@@ -1,0 +1,25 @@
+# Game extraction cache (large, regeneratable from Data.p4k)
+cache/
+
+# Extracted tools (downloaded separately)
+tools/
+
+# Generated output JSON
+output/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude session files
+.claude/

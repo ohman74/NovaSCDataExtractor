@@ -1,0 +1,1683 @@
+"""Build ship data JSON with hardpoints, stats, and default loadout."""
+
+from ..utils import safe_float, safe_int, resolve_name
+from ..vehicle_impl_parser import get_vehicle_impl_data
+
+# Movement classes that indicate ground vehicles (case-insensitive)
+_GROUND_MOVEMENT_CLASSES = {"arcadewheeled", "wheeled", "tracked"}
+
+# Patterns that indicate non-player variants
+_EXCLUDED_PATTERNS = [
+    "_PU_AI_", "_EA_AI_", "_Unmanned_", "_Template",
+    "_S42_", "_AI_", "_NPC_", "_Dummy",
+    "_Derelict_", "_Wreck", "_NoDebris",
+    "_Hijacked", "_Boarded", "_Crewless",
+    "_NoInterior", "_Drug_", "_Piano",
+    "_Tutorial", "_FW22NFZ",
+    "_GameMaster", "_Invictus", "_FW_25",
+    "_Prison",
+]
+
+
+def _is_ground_vehicle(vehicle):
+    """Return True if the vehicle record represents a ground vehicle."""
+    movement = vehicle.get("movementClass", "").lower()
+    is_grav = vehicle.get("isGravlevVehicle", False)
+    return movement in _GROUND_MOVEMENT_CLASSES or is_grav
+
+
+def _is_salvageable_debris(record):
+    """Return True if the record is salvageable debris."""
+    path = record.get("path", "")
+    class_name = record.get("className", "")
+    return "salvagable" in path.lower() or "salvageable" in path.lower() or class_name.startswith("SalvageableDebris")
+
+
+def _is_ai_or_excluded_variant(class_name):
+    """Return True if this is an AI/unmanned/template variant to exclude."""
+    cn = class_name
+    for pat in _EXCLUDED_PATTERNS:
+        if pat in cn:
+            return True
+
+    # Orbital sentries, probes, EA destructibles
+    cn_lower = cn.lower()
+    if any(p in cn_lower for p in [
+        "orbital_sentry", "probe_comms", "eaobjectivedestructable",
+        "securitynetwork",
+    ]):
+        return True
+
+    # Apollo tier variants (Tier_1/2/3 are module configs, not separate ships)
+    if "_Tier_" in cn:
+        return True
+
+    # Javelin (not flight-ready)
+    if cn == "AEGS_Javelin":
+        return True
+
+    # Mantis unmanned
+    if cn.endswith("_Unmanned"):
+        return True
+
+    return False
+
+
+def _is_paint_only_variant(class_name, record, ctx):
+    """Return True if this variant's component loadout is identical to a base ship.
+
+    Compares weapons, shields, coolers, power plants, quantum drives, radar, missiles
+    against potential base ships. If components match → paint-only → exclude.
+    If components differ → keep.
+    """
+    base_name = _find_base_ship(class_name, ctx)
+    if not base_name:
+        return False  # No base found, keep it
+
+    base_record = ctx.vehicles.get(base_name)
+    if not base_record:
+        return False
+
+    base_sig = _loadout_signature(base_record)
+    variant_sig = _loadout_signature(record)
+
+    return base_sig == variant_sig
+
+
+def _find_base_ship(class_name, ctx):
+    """Find the base ship by progressively removing trailing segments.
+
+    AEGS_Eclipse_BIS2950 -> tries AEGS_Eclipse_BIS2950 (self, skip)
+                         -> tries AEGS_Eclipse (found!)
+    ANVL_Hornet_F7A_Mk2_Exec_Military -> tries ...Mk2_Exec_Military (self)
+                                       -> tries ...Mk2_Exec (exists? check)
+                                       -> tries ...Mk2 (exists? check)
+    """
+    parts = class_name.split("_")
+
+    # Try removing segments from the end, one at a time
+    for i in range(len(parts) - 1, 1, -1):
+        candidate = "_".join(parts[:i])
+        if candidate == class_name:
+            continue
+        if candidate in ctx.vehicles:
+            # Make sure it's a real vehicle (not just any entity)
+            veh = ctx.vehicles[candidate].get("vehicle", {})
+            if veh.get("vehicleName"):
+                return candidate
+
+    return None
+
+
+def _loadout_signature(record):
+    """Get a frozenset of (portName, entityClassName) for component-level comparison.
+
+    Excludes cosmetic ports (paint, flair) and structural ports (thrusters, engines,
+    retro, doors, seats, screens) that don't represent swappable equipment choices.
+    """
+    dl = record.get("components", {}).get("defaultLoadout", [])
+    pairs = set()
+
+    _SKIP_PORTS = [
+        "paint", "flair", "thruster", "engine", "retro", "vtol",
+        "seat", "door", "screen", "dashboard", "display", "relay",
+        "light", "engineering", "docking", "fuel_port", "air_traffic",
+        "controller_door", "controller_light", "controller_comms",
+        "controller_energy", "controller_capacitor", "controller_fuel",
+        "controller_missile", "controller_weapon", "controller_salvage",
+        "landingpad", "selfdestr", "self_destr", "cargogrid",
+        "ramp", "tractor_carriage", "tractor_mount",
+    ]
+
+    def walk(entries):
+        for e in entries:
+            pn = e.get("portName", "")
+            cn = e.get("entityClassName", "")
+            ref = e.get("entityClassReference", "")
+            pn_lower = pn.lower()
+            if pn and not any(skip in pn_lower for skip in _SKIP_PORTS):
+                pairs.add((pn, cn or ref))
+            for c in e.get("children", []):
+                walk([c])
+
+    walk(dl)
+    return frozenset(pairs)
+
+
+def build_ships(ctx):
+    """Build the ships output dataset."""
+    ships = []
+
+    for class_name, record in ctx.vehicles.items():
+        vehicle = record.get("vehicle", {})
+        if not vehicle:
+            continue
+        if _is_salvageable_debris(record):
+            continue
+        if _is_ai_or_excluded_variant(class_name):
+            continue
+        if _is_paint_only_variant(class_name, record, ctx):
+            continue
+
+        ship = _build_ship(class_name, record, ctx)
+        if ship:
+            is_ground = _is_ground_vehicle(vehicle)
+            ship["IsSpaceship"] = not is_ground
+            if is_ground:
+                ship["Type"] = "Gravlev" if vehicle.get("isGravlevVehicle", False) else "Vehicle"
+            else:
+                ship["Type"] = "Ship"
+            ships.append(ship)
+
+    ships.sort(key=lambda s: s.get("Name", ""))
+    print(f"  Built {len(ships)} ships")
+    return ships
+
+
+def _build_ship(class_name, record, ctx):
+    """Build a single ship dict."""
+    vehicle = record.get("vehicle", {})
+    attach_def = record.get("attachDef", {})
+    components = record.get("components", {})
+    default_loadout = components.get("defaultLoadout", [])
+
+    # Manufacturer
+    mfr_guid = vehicle.get("manufacturerGuid", "") or attach_def.get("manufacturerGuid", "")
+    mfr = ctx.get_manufacturer(mfr_guid)
+
+    ship = {
+        "ClassName": class_name,
+        "Name": ctx.resolve_name(vehicle.get("vehicleName", class_name)),
+        "Description": ctx.resolve_name(vehicle.get("vehicleDescription", "")),
+        "Manufacturer": mfr.get("Name", "") if mfr else "",
+        "Career": ctx.resolve_name(vehicle.get("vehicleCareer", "")),
+        "Role": ctx.resolve_name(vehicle.get("vehicleRole", "")),
+        "Size": attach_def.get("size", 0),
+        "Crew": vehicle.get("crewSize", 0),
+    }
+
+    # Dimensions from vehicle bounding box
+    dims = vehicle.get("dimensions")
+    if dims:
+        ship["Dimensions"] = {
+            "Length": dims.get("y", 0),
+            "Width": dims.get("x", 0),
+            "Height": dims.get("z", 0),
+        }
+
+    # Insurance
+    insurance = record.get("insurance")
+    if insurance:
+        ship["Insurance"] = {
+            "StandardClaimTime": round(insurance.get("baseWaitTimeMinutes", 0), 2),
+            "ExpeditedClaimTime": round(insurance.get("mandatoryWaitTimeMinutes", 0), 2),
+            "ExpeditedCost": insurance.get("baseExpeditingFee", 0),
+        }
+
+    # Vehicle implementation data (mass, port definitions)
+    veh_def = vehicle.get("vehicleDefinition", "")
+    impl = get_vehicle_impl_data(ctx.vehicle_impls, veh_def, class_name)
+
+    # Compute storage from seat access inventory containers
+    storage_entries = _compute_storage(default_loadout, ctx)
+    if storage_entries:
+        # Will be placed in Hardpoints.Components.Storage
+        ship["_storage"] = storage_entries
+
+    # Mass from vehicle implementation XML
+    if impl and impl.get("mass"):
+        ship["Mass"] = impl["mass"]
+
+    # Compute component mass from loadout
+    if default_loadout:
+        _, component_mass = _compute_mass(default_loadout, ctx)
+        if component_mass > 0:
+            ship["ComponentsMass"] = round(component_mass, 2)
+
+    # Armor stats from armor item in loadout
+    armor = _build_armor_stats(default_loadout, ctx)
+    if armor:
+        ship["Armor"] = armor
+
+    # Hull structure HP from vehicle impl
+    hull = _build_hull_stats(default_loadout, ctx, impl)
+    if hull:
+        ship["Hull"] = hull
+
+    # Cargo from cargo grid inventories in loadout
+    cargo = _build_cargo(default_loadout, ctx)
+    if cargo:
+        ship["Cargo"] = cargo
+
+    # Flight characteristics from flight controller + thrusters
+    flight = _build_flight_characteristics(default_loadout, ctx)
+    if flight:
+        ship["FlightCharacteristics"] = flight
+
+    # FuelManagement from fuel tanks, intakes, and thrusters
+    fuel = _build_fuel_management(default_loadout, ctx)
+    if fuel:
+        ship["FuelManagement"] = fuel
+
+    # Emissions (CrossSection from vehicle entity)
+    emissions = _build_emissions(record)
+    if emissions:
+        ship["Emissions"] = emissions
+
+    # ResourceNetwork (weapon pool size from entity XML)
+    res_net = _build_ship_resource_network(class_name, ctx)
+    if res_net:
+        ship["ResourceNetwork"] = res_net
+
+    # Build hardpoints from default loadout + port definitions from impl
+    if default_loadout:
+        impl_ports = impl.get("ports", []) if impl else []
+        ship["Hardpoints"] = _build_hardpoints(default_loadout, ctx, impl_ports,
+                                                ship.pop("_storage", []))
+
+    # BaseLoadout summary (computed from hardpoints)
+    base_loadout = _build_base_loadout_summary(ship.get("Hardpoints", {}), ctx)
+    if base_loadout:
+        ship["BaseLoadout"] = base_loadout
+
+    # WeaponCrew / OperationsCrew (computed from turret seat count)
+    weapon_crew, ops_crew = _count_crew(default_loadout, ctx)
+    ship["WeaponCrew"] = weapon_crew
+    ship["OperationsCrew"] = ops_crew
+
+    return ship
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Ship-level stats builders
+# ──────────────────────────────────────────────────────────────────────
+
+def _build_armor_stats(loadout_entries, ctx):
+    """Extract top-level Armor stats from the armor item in the ship's loadout."""
+    # Find the armor item in the loadout (port name contains "armor"/"armour",
+    # or entity class starts with ARMR_). Search recursively through children.
+    armor_record = None
+
+    def _find_armor(entries):
+        nonlocal armor_record
+        for entry in entries:
+            pn = entry.get("portName", "").lower()
+            entity_class, item = _resolve_entry(entry, ctx)
+            if item and ("armor" in pn or "armour" in pn
+                         or (entity_class and entity_class.startswith("ARMR_"))):
+                armor_record = item
+                return
+            children = entry.get("children", [])
+            if children:
+                _find_armor(children)
+                if armor_record:
+                    return
+
+    _find_armor(loadout_entries)
+
+    if not armor_record:
+        return None
+
+    comps = armor_record.get("components", {})
+    health_comp = comps.get("health", {})
+    armor_comp = comps.get("armor", {})
+
+    result = {}
+
+    # Durability — health + damage resistance multipliers from SHealthComponentParams
+    durability = {}
+    if health_comp.get("health"):
+        durability["Health"] = health_comp["health"]
+    health_mults = health_comp.get("damageMultipliers", {})
+    if health_mults:
+        durability["DamageMultipliers"] = {
+            "Physical": health_mults.get("physical", 1.0),
+            "Energy": health_mults.get("energy", 1.0),
+            "Distortion": health_mults.get("distortion", 1.0),
+            "Thermal": health_mults.get("thermal", 1.0),
+            "Biochemical": health_mults.get("biochemical", 1.0),
+            "Stun": health_mults.get("stun", 1.0),
+        }
+    if durability:
+        result["Durability"] = durability
+
+    # DamageDeflection from SCItemVehicleArmorParams
+    defl = armor_comp.get("damageDeflection", {})
+    if defl:
+        result["DamageDeflection"] = {
+            "Physical": defl.get("physical", 0.0),
+            "Energy": defl.get("energy", 0.0),
+            "Distortion": defl.get("distortion", 0.0),
+        }
+
+    # DamageMultipliers from SCItemVehicleArmorParams (armor-level, separate from durability)
+    armor_mults = armor_comp.get("damageMultipliers", {})
+    if armor_mults:
+        result["DamageMultipliers"] = {
+            "Physical": armor_mults.get("physical", 1.0),
+            "Energy": armor_mults.get("energy", 1.0),
+            "Distortion": armor_mults.get("distortion", 1.0),
+        }
+
+    # SignalMultipliers from SCItemVehicleArmorParams
+    sig = armor_comp.get("signalMultipliers", {})
+    if sig:
+        result["SignalMultipliers"] = {
+            "Electromagnetic": sig.get("em", 1.0),
+            "Infrared": sig.get("ir", 1.0),
+            "CrossSection": sig.get("cs", 1.0),
+        }
+
+    return result if result else None
+
+
+def _build_emissions(record):
+    """Extract Emissions (CrossSection) from vehicle entity's SSCSignatureSystemParams."""
+    comps = record.get("components", {})
+    sig_sys = comps.get("SSCSignatureSystemParams", {})
+    radar_props = sig_sys.get("radarProperties", {}).get("SSCRadarContactProperites", {})
+    cs_params = radar_props.get("crossSectionParams", {}).get(
+        "SSCSignatureSystemManualCrossSectionParams", {}
+    )
+    cs = cs_params.get("crossSection", {})
+
+    if not cs:
+        return None
+
+    # Cross-section axes: x=Side, y=Front, z=Top
+    front = safe_float(cs.get("y", 0))
+    side = safe_float(cs.get("x", 0))
+    top = safe_float(cs.get("z", 0))
+
+    if not (front or side or top):
+        return None
+
+    return {
+        "Electromagnetic": {"SCMIdle": 0.0, "SCMActive": 0.0, "NAV": 0.0},
+        "Infrared": {"Start": 0.0},
+        "CrossSection": {
+            "Front": front,
+            "Side": side,
+            "Top": top,
+        },
+    }
+
+
+def _build_cargo(loadout_entries, ctx):
+    """Compute Cargo SCU from cargo grid and storage inventories in the loadout."""
+    cargo_grid_scu = 0.0
+    storage_scu = 0.0
+
+    def _walk(entries):
+        nonlocal cargo_grid_scu, storage_scu
+        for entry in entries:
+            pn = entry.get("portName", "").lower()
+            entity_class, item_record = _resolve_entry(entry, ctx)
+            if item_record:
+                comps = item_record.get("components", {})
+                inv_comp = comps.get("SCItemInventoryContainerComponentParams", {})
+                if isinstance(inv_comp, dict):
+                    container_guid = inv_comp.get("containerParams", "")
+                    capacity = ctx.get_inventory_capacity(container_guid)
+                    if capacity > 0:
+                        if "cargogrid" in pn or "cargo_grid" in pn or "cargo" in pn:
+                            cargo_grid_scu += capacity
+                        else:
+                            storage_scu += capacity
+            children = entry.get("children", [])
+            if children:
+                _walk(children)
+
+    _walk(loadout_entries)
+
+    if not cargo_grid_scu and not storage_scu:
+        return None
+
+    return {
+        "CargoGrid": round(cargo_grid_scu, 2),
+        "CargoContainers": 0.0,
+        "Storage": round(storage_scu, 2),
+    }
+
+
+def _build_hull_stats(loadout_entries, ctx, impl):
+    """Build Hull stats from vehicle impl XML (structural part HP)."""
+    if not impl:
+        return None
+    hull_hp = impl.get("hullHP")
+    if not hull_hp:
+        return None
+
+    result = {"StructureHealthPoints": {}}
+    if hull_hp.get("VitalParts"):
+        result["StructureHealthPoints"]["VitalParts"] = hull_hp["VitalParts"]
+    if hull_hp.get("Parts"):
+        result["StructureHealthPoints"]["Parts"] = hull_hp["Parts"]
+
+    return result if result["StructureHealthPoints"] else None
+
+
+def _build_flight_characteristics(loadout_entries, ctx):
+    """Extract FlightCharacteristics from flight controller (IFCSParams) and thrusters."""
+    ifcs = None
+    qd_spool = 0.0
+    thrust_by_type = {}  # Main/Retro/VTOL/Maneuvering -> total capacity
+    has_vtol = False
+
+    def _classify_thruster(port_name, class_name):
+        """Classify thruster by port name and class name (thrusterType is unreliable)."""
+        pn = port_name.lower()
+        cn = class_name.lower()
+        if "vtol" in pn or "_vtol" in cn:
+            return "VTOL"
+        if "retro" in pn or "_retro" in cn:
+            return "Retro"
+        if any(x in pn for x in ["main_thruster", "thruster_main", "mainthruster", "engine"]):
+            return "Main"
+        if "_main" in cn and "thruster" in cn:
+            return "Main"
+        return "Maneuvering"
+
+    def _walk_loadout(entries):
+        nonlocal ifcs, qd_spool, has_vtol
+        for entry in entries:
+            pn = entry.get("portName", "").lower()
+            entity_class, item_record = _resolve_entry(entry, ctx)
+            if item_record:
+                comps = item_record.get("components", {})
+
+                # Flight controller — IFCSParams
+                if ("controller_flight" in pn or "flight_blade" in pn) and "IFCSParams" in comps:
+                    ifcs = comps["IFCSParams"]
+
+                # Thrusters — aggregate by classified type
+                if "SCItemThrusterParams" in comps:
+                    tp = comps["SCItemThrusterParams"]
+                    tc = safe_float(tp.get("thrustCapacity", "0"))
+                    if tc:
+                        tt = _classify_thruster(entry.get("portName", ""), entity_class)
+                        thrust_by_type[tt] = thrust_by_type.get(tt, 0.0) + tc
+                        if tt == "VTOL":
+                            has_vtol = True
+
+                # Quantum drive — spool time
+                if ("quantum_drive" in pn or "quantumdrive" in pn) and "quantumDrive" in comps:
+                    qd = comps["quantumDrive"]
+                    qd_spool = safe_float(qd.get("spoolUpTime", 0))
+
+            # Recurse into children
+            children = entry.get("children", [])
+            if children:
+                _walk_loadout(children)
+
+    _walk_loadout(loadout_entries)
+
+    if not ifcs:
+        return None
+
+    result = {}
+
+    # Basic speeds
+    scm = safe_float(ifcs.get("scmSpeed", 0))
+    max_speed = safe_float(ifcs.get("maxSpeed", 0))
+    if scm:
+        result["ScmSpeed"] = scm
+    if max_speed:
+        result["MaxSpeed"] = max_speed
+
+    # Angular velocities — x=Pitch, y=Roll, z=Yaw (CryEngine coords)
+    ang_vel = ifcs.get("maxAngularVelocity", {})
+    if ang_vel:
+        result["Pitch"] = safe_float(ang_vel.get("x", 0))
+        result["Yaw"] = safe_float(ang_vel.get("z", 0))
+        result["Roll"] = safe_float(ang_vel.get("y", 0))
+
+    result["IsVtolAssisted"] = has_vtol
+
+    # Thrust capacity aggregated by type
+    if thrust_by_type:
+        result["ThrustCapacity"] = {
+            "Main": round(thrust_by_type.get("Main", 0.0)),
+            "Retro": round(thrust_by_type.get("Retro", 0.0)),
+            "Vtol": round(thrust_by_type.get("VTOL", 0.0)),
+            "Maneuvering": round(thrust_by_type.get("Maneuvering", 0.0)),
+        }
+
+    # AccelerationG — computed from thrust / mass (not available here, skip for now)
+
+    # MasterModes
+    ifcs_core = ifcs.get("ifcsCoreParams", {})
+    base_spool = safe_float(ifcs_core.get("spoolUpTime", 0))
+    boost_fwd = safe_float(ifcs.get("boostSpeedForward", 0))
+    boost_bwd = safe_float(ifcs.get("boostSpeedBackward", 0))
+    master_modes = {}
+    if base_spool:
+        master_modes["BaseSpoolTime"] = base_spool
+    if qd_spool:
+        master_modes["QuantumDriveSpoolTime"] = qd_spool
+    scm_mode = {}
+    if boost_fwd:
+        scm_mode["BoostSpeedForward"] = boost_fwd
+    if boost_bwd:
+        scm_mode["BoostSpeedBackward"] = boost_bwd
+    if scm_mode:
+        master_modes["ScmMode"] = scm_mode
+    if master_modes:
+        result["MasterModes"] = master_modes
+
+    # Boost — from afterburner (old) block, matching SPViewer reference
+    ab = ifcs.get("afterburner", {})
+    if ab:
+        boost = {}
+        pre_delay = safe_float(ab.get("afterburnerPreDelayTime", 0))
+        ramp_up = safe_float(ab.get("afterburnerRampUpTime", 0))
+        ramp_down = safe_float(ab.get("afterburnerRampDownTime", 0))
+        boost["PreDelay"] = pre_delay
+        boost["RampUp"] = ramp_up
+        boost["RampDown"] = ramp_down
+
+        # Acceleration multipliers — x=Strafe, y=Forward, z=Up/Down
+        pos = ab.get("afterburnAccelMultiplierPositive", {})
+        neg = ab.get("afterburnAccelMultiplierNegative", {})
+        if pos or neg:
+            boost["AccelerationMultiplier"] = {
+                "PositiveAxis": {
+                    "X": safe_float(pos.get("x", 1)),
+                    "Y": safe_float(pos.get("y", 1)),
+                    "Z": safe_float(pos.get("z", 1)),
+                },
+                "NegativeAxis": {
+                    "X": safe_float(neg.get("x", 1)),
+                    "Y": safe_float(neg.get("y", 1)),
+                    "Z": safe_float(neg.get("z", 1)),
+                },
+            }
+
+        # Angular multipliers — x=Pitch, y=Roll, z=Yaw
+        ang_accel = ab.get("afterburnAngAccelMultiplier", {})
+        ang_vel_m = ab.get("afterburnAngVelocityMultiplier", {})
+        if ang_accel:
+            boost["AngularAccelerationMultiplier"] = {
+                "Pitch": safe_float(ang_accel.get("x", 1)),
+                "Yaw": safe_float(ang_accel.get("z", 1)),
+                "Roll": safe_float(ang_accel.get("y", 1)),
+            }
+        if ang_vel_m:
+            boost["AngularVelocityMultiplier"] = {
+                "Pitch": safe_float(ang_vel_m.get("x", 1)),
+                "Yaw": safe_float(ang_vel_m.get("z", 1)),
+                "Roll": safe_float(ang_vel_m.get("y", 1)),
+            }
+
+        result["Boost"] = boost
+
+    # Capacitors — from afterburner (old) block
+    if ab:
+        cap_max = safe_float(ab.get("capacitorMax", 0))
+        cap_regen = safe_float(ab.get("capacitorRegenPerSec", 0))
+        cap_idle = safe_float(ab.get("capacitorAfterburnerIdleCost", 0))
+        cap_linear = safe_float(ab.get("capacitorAfterburnerLinearCost", 0))
+        cap_usage = safe_float(ab.get("capacitorUsageModifier", 1))
+        cap_delay = safe_float(ab.get("capacitorRegenDelayAfterUse", 0))
+
+        capacitors = {
+            "ThrusterCapacitorSize": cap_max,
+            "CapacitorRegenPerSec": cap_regen,
+            "CapacitorIdleCost": cap_idle,
+            "CapacitorLinearCost": cap_linear,
+            "CapacitorUsageModifier": cap_usage,
+            "CapacitorRegenDelay": cap_delay,
+        }
+        if cap_max and cap_regen:
+            capacitors["RegenerationTime"] = round(cap_max / cap_regen, 1)
+        result["Capacitors"] = capacitors
+
+    return result if result else None
+
+
+def _build_fuel_management(loadout_entries, ctx):
+    """Build FuelManagement from fuel tanks, intakes, and thruster burn rates."""
+    fuel_capacity = 0.0
+    quantum_fuel_capacity = 0.0
+    fuel_intake_rate = 0.0
+    burn_rates = {}  # type -> rate per thruster (raw SRU/Newton)
+    thrust_caps = {}  # type -> total thrust capacity
+    thruster_counts = {}  # type -> count
+
+    def _classify_thruster_type(port_name, class_name):
+        pn = port_name.lower()
+        cn = class_name.lower()
+        if "vtol" in pn or "_vtol" in cn:
+            return "Vtol"
+        if "retro" in pn or "_retro" in cn:
+            return "Retro"
+        if any(x in pn for x in ["main_thruster", "thruster_main", "mainthruster", "engine"]):
+            return "Main"
+        if "_main" in cn and "thruster" in cn:
+            return "Main"
+        return "Maneuvering"
+
+    def _walk(entries):
+        nonlocal fuel_capacity, quantum_fuel_capacity, fuel_intake_rate
+        for entry in entries:
+            pn = entry.get("portName", "").lower()
+            entity_class, item_record = _resolve_entry(entry, ctx)
+            if item_record:
+                comps = item_record.get("components", {})
+                ad = item_record.get("attachDef", {})
+                item_type = ad.get("type", "")
+
+                # Hydrogen fuel tanks
+                if "fuel_tank" in pn and "quantum" not in pn:
+                    rc = comps.get("ResourceContainer", {})
+                    if isinstance(rc, dict):
+                        cap = rc.get("capacity", {})
+                        if isinstance(cap, dict):
+                            scu = cap.get("SStandardCargoUnit", {})
+                            if isinstance(scu, dict):
+                                fuel_capacity += safe_float(scu.get("standardCargoUnits", "0"))
+
+                # Quantum fuel tanks
+                if "quantum_fuel" in pn:
+                    rc = comps.get("ResourceContainer", {})
+                    if isinstance(rc, dict):
+                        cap = rc.get("capacity", {})
+                        if isinstance(cap, dict):
+                            scu = cap.get("SStandardCargoUnit", {})
+                            if isinstance(scu, dict):
+                                quantum_fuel_capacity += safe_float(scu.get("standardCargoUnits", "0"))
+
+                # Fuel intakes
+                intake = comps.get("SCItemFuelIntakeParams", {})
+                if isinstance(intake, dict) and intake.get("fuelPushRate"):
+                    fuel_intake_rate += safe_float(intake["fuelPushRate"])
+
+                # Thrusters — fuel burn rate and thrust
+                thruster = comps.get("SCItemThrusterParams", {})
+                if thruster:
+                    tc = safe_float(thruster.get("thrustCapacity", "0"))
+                    tt = _classify_thruster_type(entry.get("portName", ""), entity_class)
+                    if tc:
+                        thrust_caps[tt] = thrust_caps.get(tt, 0.0) + tc
+
+                    rn = thruster.get("fuelBurnRatePer10KNewtonRN", {})
+                    sru = rn.get("SStandardResourceUnit", {}) if isinstance(rn, dict) else {}
+                    rate = safe_float(sru.get("standardResourceUnits", "0")) if isinstance(sru, dict) else 0
+                    if rate and tt not in burn_rates:
+                        burn_rates[tt] = rate
+                    if tc:
+                        thruster_counts[tt] = thruster_counts.get(tt, 0) + 1
+
+            children = entry.get("children", [])
+            if children:
+                _walk(children)
+
+    _walk(loadout_entries)
+
+    if not fuel_capacity and not quantum_fuel_capacity:
+        return None
+
+    # Fuel capacity is in SCU units in ResourceContainer; multiply by 1,000,000 for game units
+    result = {
+        "FuelCapacity": fuel_capacity * 1000000.0,
+        "FuelIntakeRate": fuel_intake_rate,
+        "QuantumFuelCapacity": quantum_fuel_capacity * 1000000.0,
+    }
+
+    # Fuel burn rate per 10K Newton = rate_per_thruster * 1e6 * thruster_count
+    result["FuelBurnRatePer10KNewton"] = {}
+    for tt in ["Main", "Retro", "Vtol", "Maneuvering"]:
+        rate = burn_rates.get(tt, 0.0)
+        count = thruster_counts.get(tt, 0)
+        result["FuelBurnRatePer10KNewton"][tt] = round(rate * 1e6 * count, 4) if rate else 0.0
+
+    # Fuel usage per second = thrust capacity (N) * burn rate (SRU/N) * 100
+    result["FuelUsagePerSecond"] = {
+        "Main": float(round(thrust_caps.get("Main", 0) * burn_rates.get("Main", 0) * 100, 3)),
+        "Retro": float(round(thrust_caps.get("Retro", 0) * burn_rates.get("Retro", 0) * 100, 3)),
+        "Vtol": float(round(thrust_caps.get("Vtol", 0) * burn_rates.get("Vtol", 0) * 100, 3)),
+        "Maneuvering": float(round(thrust_caps.get("Maneuvering", 0) * burn_rates.get("Maneuvering", 0) * 100, 3)),
+    }
+
+    # Intake to fuel ratio and time to fill
+    main_usage = result["FuelUsagePerSecond"]["Main"]
+    if fuel_intake_rate > 0 and main_usage > 0:
+        result["IntakeToMainFuelRatio"] = round(fuel_intake_rate / main_usage * 100, 2)
+        result["TimeForIntakesToFillTank"] = round(result["FuelCapacity"] / fuel_intake_rate, 2)
+    else:
+        result["IntakeToMainFuelRatio"] = 0.0
+        result["TimeForIntakesToFillTank"] = "Infinity"
+
+    return result
+
+
+def _build_ship_resource_network(class_name, ctx):
+    """Build ship-level ResourceNetwork (weapon pool size from entity XML)."""
+    pool_size = ctx.weapon_pool_sizes.get(class_name.lower(), 0)
+    if pool_size:
+        return {"ItemPools": {"WeaponPoolSize": float(pool_size)}}
+    return None
+
+
+def _count_crew(loadout_entries, ctx):
+    """Count weapon crew and operations crew from turret seats."""
+    weapon_crew = 0
+    ops_crew = 0
+
+    def _walk(entries):
+        nonlocal weapon_crew, ops_crew
+        for entry in entries:
+            pn = entry.get("portName", "").lower()
+            # Turret seats indicate weapon crew
+            if "turret" in pn and ("seat" in pn or "seataccess" in pn):
+                entity_class, _ = _resolve_entry(entry, ctx)
+                if entity_class:
+                    weapon_crew += 1
+            elif "seat_operator" in pn or "engineering" in pn:
+                entity_class, _ = _resolve_entry(entry, ctx)
+                if entity_class:
+                    ops_crew += 1
+            children = entry.get("children", [])
+            if children:
+                _walk(children)
+
+    _walk(loadout_entries)
+    return weapon_crew, ops_crew
+
+
+def _build_base_loadout_summary(hardpoints, ctx):
+    """Build BaseLoadout summary stats (total shield HP, DPS, missile damage)."""
+    total_shield_hp = 0.0
+    pilot_burst_dps = 0.0
+    turrets_burst_dps = 0.0
+    total_missiles_dmg = 0.0
+
+    # Shields
+    shields = hardpoints.get("Components", {}).get("Systems", {}).get("Shields", {})
+    for item in shields.get("InstalledItems", []):
+        loadout = item.get("Loadout", "")
+        if loadout:
+            shield_item = ctx.get_item(loadout)
+            if shield_item:
+                sp = shield_item.get("components", {}).get("shield", {})
+                total_shield_hp += safe_float(sp.get("maxShieldHealth", "0"))
+
+    # Pilot weapons DPS
+    pilot_weapons = hardpoints.get("Weapons", {}).get("PilotWeapons", {})
+    for item in pilot_weapons.get("InstalledItems", []):
+        dps = _compute_hardpoint_dps(item, ctx)
+        pilot_burst_dps += dps
+
+    # Turret DPS
+    for turret_key in ["MannedTurrets", "RemoteTurrets", "PDCTurrets"]:
+        turrets = hardpoints.get("Weapons", {}).get(turret_key, {})
+        for item in turrets.get("InstalledItems", []):
+            dps = _compute_hardpoint_dps(item, ctx)
+            turrets_burst_dps += dps
+
+    # Missile damage
+    missile_racks = hardpoints.get("Weapons", {}).get("MissileRacks", {})
+    for item in missile_racks.get("InstalledItems", []):
+        dmg = _compute_missile_damage(item, ctx)
+        total_missiles_dmg += dmg
+
+    return {
+        "TotalShieldHP": round(total_shield_hp, 1),
+        "PilotBurstDPS": round(pilot_burst_dps, 1),
+        "TurretsBurstDPS": round(turrets_burst_dps, 1),
+        "TotalMissilesDmg": round(total_missiles_dmg, 1),
+    }
+
+
+def _compute_hardpoint_dps(hardpoint_entry, ctx):
+    """Compute DPS for a single hardpoint (including sub-ports)."""
+    total_dps = 0.0
+    # Check sub-ports (e.g., gimbal -> weapon)
+    for sub in hardpoint_entry.get("Ports", []):
+        total_dps += _compute_hardpoint_dps(sub, ctx)
+    if total_dps:
+        return total_dps
+
+    loadout = hardpoint_entry.get("Loadout", "")
+    if not loadout:
+        return 0.0
+    item = ctx.get_item(loadout)
+    if not item:
+        return 0.0
+    comps = item.get("components", {})
+    weapon = comps.get("weapon", {})
+    ammo_comp = comps.get("ammo", {})
+    if not weapon.get("firingModes"):
+        return 0.0
+
+    fm = weapon["firingModes"][0]
+    rpm = fm.get("fireRate", 0)
+    pellets = fm.get("pelletCount", 1) or 1
+    if not rpm:
+        return 0.0
+
+    ammo_guid = ammo_comp.get("ammoParamsRecord", "")
+    ammo_data = ctx.get_ammo(ammo_guid)
+    if not ammo_data or not ammo_data.get("damage"):
+        return 0.0
+
+    dmg = ammo_data["damage"]
+    total_dmg_per_shot = sum(v for v in dmg.values() if isinstance(v, (int, float)))
+    return total_dmg_per_shot * pellets * rpm / 60.0
+
+
+def _compute_missile_damage(hardpoint_entry, ctx):
+    """Compute total missile damage for a missile rack."""
+    total = 0.0
+    for sub in hardpoint_entry.get("Ports", []):
+        loadout = sub.get("Loadout", "")
+        if not loadout:
+            continue
+        item = ctx.get_item(loadout)
+        if not item:
+            continue
+        missile = item.get("components", {}).get("missile", {})
+        if missile:
+            total += safe_float(missile.get("explosionDamage", 0))
+    return total
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Port classification rules
+# ──────────────────────────────────────────────────────────────────────
+
+def _classify_port(port_name, item_type=""):
+    """Classify a loadout entry into its hardpoint category."""
+    pn = port_name.lower()
+    it = item_type.lower()
+
+    # Skip non-gameplay ports
+    if any(skip in pn for skip in [
+        "seat_access", "seat_pilot", "seat_copilot", "seat_passenger",
+        "escape_pod", "display_hud", "screen_", "cockpit_radar",
+        "dashboard", "door_", "relay_", "engineeringscreen",
+        "lightgroup", "light_", "controller_door", "controller_light",
+        "controller_comms", "controller_energy", "controller_capacitor",
+        "controller_fuel", "controller_missile", "controller_weapon",
+        "controller_cooler",
+        "docking_collar", "fuel_port", "air_traffic",
+        "bed_", "battery", "avionics",
+    ]):
+        return None
+
+    # WeaponsRacks
+    if "weapon_rack" in pn:
+        return "WeaponsRacks"
+
+    # Weapons — ports with "gun_", "weapon_pilot", ending in "_Weapon", or "hardpoint_weapon_"
+    if (any(p in pn for p in ["gun_", "weapon_pilot", "hardpoint_weapon_"]) or pn.endswith("_weapon")) and "turret" not in pn and "rack" not in pn and "controller" not in pn:
+        return "PilotWeapons"
+    if "tractor" in pn and "turret" in pn:
+        return "UtilityHardpoints"
+    if "turret_base" in pn or "turret_upper" in pn or "turret_lower" in pn:
+        return "Turrets"
+    if "turret" in pn and "seataccess" not in pn and "controller" not in pn:
+        return "Turrets"
+    if "missilerack" in pn or "missile_rack" in pn:
+        return "MissileRacks"
+    if "bomb" in pn:
+        return "BombRacks"
+    if "cm_launcher" in pn or "countermeasure" in pn:
+        return "Countermeasures"
+    if "mining" in pn:
+        return "MiningHardpoints"
+    if "salvage" in pn:
+        return "SalvageHardpoints"
+    if "interdiction" in pn or "quantum_enforcement" in pn or "interdiction_device" in pn:
+        return "InterdictionHardpoints"
+    if "utility" in pn:
+        return "UtilityHardpoints"
+
+    # Components - Propulsion
+    if "powerplant" in pn or "power_plant" in pn:
+        return "PowerPlants"
+    if "quantum_drive" in pn or "quantumdrive" in pn:
+        return "QuantumDrives"
+    if ("engine" in pn or "thruster_main" in pn or "main_thruster" in pn) and "engineering" not in pn:
+        return "MainThrusters"
+    if "retro" in pn:
+        return "RetroThrusters"
+    if "thruster_vtol" in pn:
+        return "VtolThrusters"
+    if "thruster" in pn and "vtol" not in pn:
+        return "ManeuveringThrusters"
+    if "quantum_fuel" in pn:
+        return "QuantumFuelTanks"
+    if "fuel_tank" in pn:
+        return "HydrogenFuelTanks"
+
+    # Components - Systems
+    if "controller_shield" in pn:
+        return "ShieldControllers"
+    if "controller_flight" in pn or "flight_blade" in pn:
+        return "FlightBlade"
+    if ("shield" in pn) and "controller" not in pn:
+        return "Shields"
+    if ("cooler" in pn) and "controller" not in pn:
+        return "Coolers"
+    if "lifesupport" in pn or "life_support" in pn:
+        return "LifeSupport"
+    if "fuel_intake" in pn:
+        return "FuelIntakes"
+    if "selfdestruct" in pn or "self_destruct" in pn:
+        return "SelfDestruct"
+
+    # Components - Avionics
+    if "radar" in pn and "controller" not in pn:
+        return "Radars"
+
+    # Components - Other
+    if "armor" in pn or "armour" in pn:
+        return "Armor"
+    if "paint" in pn:
+        return "Paints"
+    if "flair" in pn:
+        return "Flairs"
+    if "cargogrid" in pn or "cargo_grid" in pn:
+        return "CargoGrids"
+    if "storage" in pn or "personal_storage" in pn:
+        return "Storage"
+    if "module" in pn:
+        return "Modules"
+
+    # Fallback on item type
+    if "weapongun" in it:
+        return "PilotWeapons"
+    if "missilelauncher" in it:
+        return "MissileRacks"
+    if "weapondefensive" in it:
+        return "Countermeasures"
+    if "turret" in it:
+        return "Turrets"
+    if "shield" in it and "controller" not in it:
+        return "Shields"
+    if "powerplant" in it:
+        return "PowerPlants"
+    if "cooler" in it:
+        return "Coolers"
+    if "quantumdrive" in it:
+        return "QuantumDrives"
+    if "radar" in it:
+        return "Radars"
+    if "paints" in it:
+        return "Paints"
+
+    return None
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Hardpoint tree builder
+# ──────────────────────────────────────────────────────────────────────
+
+def _empty_category():
+    return {"InstalledItems": [], "Hardpoints": 0}
+
+
+def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=None):
+    """Build the structured Hardpoints tree matching the reference format."""
+    # Build port lookup from vehicle impl for minSize/maxSize/types
+    port_defs = {}
+    if impl_ports:
+        _index_ports(impl_ports, port_defs)
+
+    tree = {
+        "Weapons": {
+            "PilotWeapons": _empty_category(),
+            "MannedTurrets": _empty_category(),
+            "RemoteTurrets": _empty_category(),
+            "PDCTurrets": _empty_category(),
+            "MissileRacks": _empty_category(),
+            "BombRacks": _empty_category(),
+            "InterdictionHardpoints": _empty_category(),
+            "MiningHardpoints": _empty_category(),
+            "SalvageHardpoints": _empty_category(),
+            "UtilityHardpoints": _empty_category(),
+            "UtilityTurrets": _empty_category(),
+        },
+        "Components": {
+            "Propulsion": {
+                "PowerPlants": _empty_category(),
+                "QuantumDrives": _empty_category(),
+                "Thrusters": {
+                    "MainThrusters": {"InstalledItems": [], "ItemsQuantity": 0},
+                    "RetroThrusters": {"InstalledItems": [], "ItemsQuantity": 0},
+                    "VtolThrusters": {"ItemsQuantity": 0},
+                    "ManeuveringThrusters": {"InstalledItems": [], "ItemsQuantity": 0},
+                },
+                "QuantumFuelTanks": {"InstalledItems": [], "ItemsQuantity": 0},
+                "HydrogenFuelTanks": {"InstalledItems": [], "ItemsQuantity": 0},
+            },
+            "Systems": {
+                "Controllers": {},
+                "Shields": _empty_category(),
+                "Coolers": _empty_category(),
+                "LifeSupport": {"InstalledItems": []},
+                "FuelIntakes": {"InstalledItems": [], "ItemsQuantity": 0},
+                "Countermeasures": {"InstalledItems": [], "ItemsQuantity": 0},
+            },
+            "Avionics": {
+                "FlightBlade": {"InstalledItems": []},
+                "Radars": _empty_category(),
+                "SelfDestruct": {"InstalledItems": [], "ItemsQuantity": 0},
+            },
+            "Modules": _empty_category(),
+            "CargoGrids": {"ItemsQuantity": 0},
+            "CargoContainers": {"ItemsQuantity": 0},
+            "Storage": {"InstalledItems": [], "ItemsQuantity": 0},
+            "WeaponsRacks": {"InstalledItems": [], "ItemsQuantity": 0},
+            "Paints": _empty_category(),
+            "Flairs": _empty_category(),
+        },
+    }
+
+    for entry in loadout_entries:
+        port_name = entry.get("portName", "")
+        if not port_name:
+            continue
+
+        entity_class, item_record = _resolve_entry(entry, ctx)
+
+        # Skip entries with no resolved entity and no children
+        if not entity_class and not entry.get("children"):
+            continue
+
+        item_type = ""
+        if item_record:
+            item_type = item_record.get("attachDef", {}).get("type", "")
+
+        category = _classify_port(port_name, item_type)
+        if not category:
+            continue
+
+        children = entry.get("children", [])
+
+        # Get port definition from vehicle impl if available
+        port_def = port_defs.get(port_name, {})
+
+        # Build the entry differently based on category
+        if category in ("MainThrusters", "RetroThrusters", "VtolThrusters", "ManeuveringThrusters"):
+            hp = _build_thruster_entry(port_name, entity_class, item_record, ctx)
+            _place(tree, category, hp)
+        elif category in ("Countermeasures",):
+            hp = _build_cm_entry(port_name, entity_class, item_record, ctx)
+            _place(tree, category, hp)
+        elif category in ("HydrogenFuelTanks", "QuantumFuelTanks", "FuelIntakes"):
+            hp = _build_simple_entry(port_name, entity_class, item_record, ctx)
+            _place(tree, category, hp)
+        elif category == "Storage":
+            hp = _build_storage_entry(port_name, entity_class, item_record, ctx)
+            _place(tree, category, hp)
+        else:
+            hp = _build_standard_entry(port_name, entity_class, item_record, children, ctx, port_def)
+            _place(tree, category, hp)
+
+            # FlightBlade also gets an IFCS entry under Controllers
+            if category == "FlightBlade" and item_record:
+                ifcs_entry = {"ClassName": entity_class}
+                tree["Components"]["Systems"]["Controllers"].setdefault(
+                    "Ifcs", {"InstalledItems": []}
+                )["InstalledItems"].append(ifcs_entry)
+
+    # Add computed storage entries
+    if storage_entries:
+        for se in storage_entries:
+            _place(tree, "Storage", se)
+
+    # Add ports from vehicle impl that aren't in the loadout
+    if impl_ports:
+        loadout_port_names = {e.get("portName", "") for e in loadout_entries}
+        _add_impl_only_ports(tree, impl_ports, loadout_port_names)
+
+    # Also ensure loadout entries with empty entities but known port categories are counted
+    for entry in loadout_entries:
+        port_name = entry.get("portName", "")
+        if not port_name:
+            continue
+        entity_class = entry.get("entityClassName", "")
+        entity_ref = entry.get("entityClassReference", "")
+        if entity_class or entity_ref:
+            continue  # Already handled above
+        # Empty port — classify and add if it's a countable category
+        pn = port_name.lower()
+        port_def = port_defs.get(port_name, {})
+        item_type = ""
+        if port_def and port_def.get("types"):
+            item_type = port_def["types"][0]
+        category = _classify_port(port_name, item_type)
+        if category and category in ("Paints", "Flairs"):
+            # Count empty paint/flair ports (they represent a customizable slot)
+            hp = {"PortName": port_name, "Uneditable": False}
+            if port_def:
+                hp["MinSize"] = port_def.get("minSize", 0)
+                hp["MaxSize"] = port_def.get("maxSize", 0)
+                hp["Types"] = port_def.get("types", [])
+                pt = port_def.get("portTags", "")
+                if pt:
+                    hp["PortTags"] = pt.split()
+                rt = port_def.get("requiredPortTags", "")
+                if rt:
+                    hp["RequiredTags"] = rt.split()
+            _place(tree, category, hp)
+
+    # Radar DetectionCapability
+    _enrich_radar_detection(tree, ctx)
+
+    # Shield FaceType + MaxItem
+    _enrich_shield_info(tree, loadout_entries, ctx)
+
+    # Update counts
+    _update_counts(tree)
+
+    return tree
+
+
+def _enrich_radar_detection(tree, ctx):
+    """Add DetectionCapability to Radars from SCItemRadarComponentParams."""
+    radars_node = tree.get("Components", {}).get("Avionics", {}).get("Radars", {})
+    installed = radars_node.get("InstalledItems", [])
+    if not installed:
+        return
+
+    detection = []
+    for radar_entry in installed:
+        class_name = radar_entry.get("Loadout", "")
+        if not class_name:
+            continue
+        item = ctx.get_item(class_name)
+        if not item:
+            continue
+        rcomp = item.get("components", {}).get("SCItemRadarComponentParams", {})
+        sd = rcomp.get("signatureDetection", {}).get("SCItemRadarSignatureDetection", [])
+        if not sd or len(sd) < 5:
+            continue
+
+        # Signal order: 0=IR, 1=EM, 2=CS, 3=unused, 4=RS
+        ir_sens = safe_float(sd[0].get("sensitivity", "0"))
+        em_sens = safe_float(sd[1].get("sensitivity", "0"))
+        cs_sens = safe_float(sd[2].get("sensitivity", "0"))
+        rs_sens = safe_float(sd[4].get("sensitivity", "0"))
+
+        ir_pierce = safe_float(sd[0].get("piercing", "0"))
+        em_pierce = safe_float(sd[1].get("piercing", "0"))
+        cs_pierce = safe_float(sd[2].get("piercing", "0"))
+        rs_pierce = safe_float(sd[4].get("piercing", "0"))
+
+        # Ground sensitivity = base sensitivity + sensitivityAddition modifier
+        ground_add = 0.0
+        sm = rcomp.get("sensitivityModifiers", {})
+        if isinstance(sm, dict):
+            mod = sm.get("SCItemRadarSensitivityModifier", {})
+            if isinstance(mod, dict):
+                ground_add = safe_float(mod.get("sensitivityAddition", "0"))
+
+        ad = item.get("attachDef", {})
+        entry = {
+            "Name": ctx.resolve_name(ad.get("name", "")),
+            "PortName": radar_entry.get("PortName", ""),
+            "Size": ad.get("size", 0),
+            "Sensitivity": {
+                "IRSensitivity": ir_sens,
+                "EMSensitivity": em_sens,
+                "CSSensitivity": cs_sens,
+                "RSSensitivity": rs_sens,
+            },
+            "GroundSensitivity": {
+                "IRSensitivity": round(ir_sens + ground_add, 4),
+                "EMSensitivity": round(em_sens + ground_add, 4),
+                "CSSensitivity": round(cs_sens + ground_add, 4),
+                "RSSensitivity": round(rs_sens + ground_add, 4),
+            },
+            "Piercing": {
+                "IRPiercing": ir_pierce,
+                "EMPiercing": em_pierce,
+                "CSPiercing": cs_pierce,
+                "RSPiercing": rs_pierce,
+            },
+        }
+        detection.append(entry)
+
+    if detection:
+        radars_node["DetectionCapability"] = detection
+
+
+def _enrich_shield_info(tree, loadout_entries, ctx):
+    """Add FaceType and MaxItem to the Shields node."""
+    shields_node = tree.get("Components", {}).get("Systems", {}).get("Shields", {})
+    installed = shields_node.get("InstalledItems", [])
+
+    # FaceType from shield controller item (hardpoint_controller_shield)
+    def _find_shield_controller(entries):
+        for entry in entries:
+            pn = entry.get("portName", "").lower()
+            if "controller_shield" in pn:
+                entity_class, item_record = _resolve_entry(entry, ctx)
+                if item_record:
+                    se = item_record.get("components", {}).get("SCItemShieldEmitterParams", {})
+                    ft = se.get("FaceType", "")
+                    if ft:
+                        return ft
+            children = entry.get("children", [])
+            if children:
+                result = _find_shield_controller(children)
+                if result:
+                    return result
+        return None
+
+    face_type = _find_shield_controller(loadout_entries)
+    if face_type:
+        shields_node["FaceType"] = face_type
+
+
+def _compute_storage(loadout_entries, ctx):
+    """Find storage/inventory entries by checking seat access entities."""
+    storage = []
+
+    def _walk(entries):
+        for entry in entries:
+            entity_class, item_record = _resolve_entry(entry, ctx)
+            if item_record:
+                comps = item_record.get("components", {})
+                inv = comps.get("SCItemInventoryContainerComponentParams", {})
+                if isinstance(inv, dict):
+                    container_guid = inv.get("containerParams", "")
+                    capacity = ctx.get_inventory_capacity(container_guid)
+                    if capacity > 0:
+                        ad = item_record.get("attachDef", {})
+                        storage.append({
+                            "Name": ctx.resolve_name(ad.get("name", "Access")),
+                            "Mass": 0.0,
+                            "Size": ad.get("size", 1),
+                            "Grade": ad.get("grade", 1),
+                            "Capacity": capacity,
+                            "Uneditable": True,
+                        })
+            children = entry.get("children", [])
+            if children:
+                _walk(children)
+
+    _walk(loadout_entries)
+    return storage
+
+
+def _add_impl_only_ports(tree, impl_ports, loadout_port_names):
+    """Add ports from vehicle impl that aren't in the loadout (storage, paints, etc.)."""
+    for port in impl_ports:
+        pname = port.get("name", "")
+        if pname and pname not in loadout_port_names:
+            item_type = port["types"][0] if port.get("types") else ""
+            category = _classify_port(pname, item_type)
+            if category and category in ("Paints", "Storage"):
+                hp = {"PortName": pname, "Uneditable": port.get("uneditable", False),
+                      "MinSize": port.get("minSize", 0), "MaxSize": port.get("maxSize", 0),
+                      "Types": port.get("types", [])}
+                _place(tree, category, hp)
+        # Recurse into sub-ports
+        for sub in port.get("subPorts", []):
+            sub_name = sub.get("name", "")
+            if sub_name and sub_name not in loadout_port_names:
+                item_type = sub["types"][0] if sub.get("types") else ""
+                category = _classify_port(sub_name, item_type)
+                if category and category in ("Paints", "Storage"):
+                    hp = {"PortName": sub_name, "Uneditable": sub.get("uneditable", False),
+                          "MinSize": sub.get("minSize", 0), "MaxSize": sub.get("maxSize", 0),
+                          "Types": sub.get("types", [])}
+                    _place(tree, category, hp)
+
+
+def _index_ports(impl_ports, port_defs):
+    """Build a flat lookup of port name -> port definition from vehicle impl ports."""
+    for port in impl_ports:
+        name = port.get("name", "")
+        if name:
+            port_defs[name] = port
+        # Recurse into sub-ports
+        sub = port.get("subPorts", [])
+        if sub:
+            _index_ports(sub, port_defs)
+
+
+def _compute_mass(loadout_entries, ctx):
+    """Compute total mass by summing all component masses from the loadout."""
+    total = 0.0
+    component_mass = 0.0
+
+    def _walk(entries):
+        nonlocal total, component_mass
+        for entry in entries:
+            entity_class, item_record = _resolve_entry(entry, ctx)
+            if item_record:
+                physics = item_record.get("components", {}).get("physics", {})
+                mass = physics.get("mass", 0)
+                if mass:
+                    total += mass
+                    component_mass += mass
+            children = entry.get("children", [])
+            if children:
+                _walk(children)
+
+    _walk(loadout_entries)
+    return total, component_mass
+
+
+def _resolve_entry(entry, ctx):
+    """Resolve a loadout entry to (className, itemRecord)."""
+    entity_class = entry.get("entityClassName", "")
+    entity_ref = entry.get("entityClassReference", "")
+
+    if entity_class:
+        return entity_class, ctx.get_item(entity_class)
+    elif entity_ref:
+        resolved = ctx.resolve_guid(entity_ref) or entity_ref
+        return resolved, ctx.get_item(resolved)
+    return "", None
+
+
+def _build_standard_entry(port_name, entity_class, item_record, children, ctx, port_def=None, parent_tags=None):
+    """Build a standard hardpoint entry with BaseLoadout and sub-ports."""
+    entry = {"PortName": port_name}
+
+    # Tags from parent item (describes the port's capability)
+    if parent_tags:
+        entry["Tags"] = parent_tags
+
+    if item_record:
+        ad = item_record.get("attachDef", {})
+        size = ad.get("size", 0)
+        full_type = _full_type(ad)
+        mfr = ctx.get_manufacturer(ad.get("manufacturerGuid", ""))
+
+        # Use port definition from vehicle impl for size/types if available
+        if port_def:
+            entry["MinSize"] = port_def.get("minSize", size)
+            entry["MaxSize"] = port_def.get("maxSize", size)
+        else:
+            entry["MinSize"] = size
+            entry["MaxSize"] = size
+        entry["Loadout"] = entity_class
+        entry["BaseLoadout"] = {
+            "ClassName": entity_class,
+            "Name": ctx.resolve_name(ad.get("name", "")),
+            "Type": full_type,
+            "Size": size,
+            "Grade": ad.get("grade", 0),
+            "Class": "",
+        }
+        # Types: from port definition (vehicle impl) if available, otherwise
+        # build from item type + child port types for comprehensive listing
+        if port_def and port_def.get("types"):
+            entry["Types"] = port_def["types"]
+        else:
+            types = []
+            if full_type:
+                types.append(full_type)
+            # Add child port types from the installed item's port container
+            item_ports = item_record.get("components", {}).get("ports", [])
+            for ip in item_ports:
+                for pt in ip.get("types", []):
+                    if pt not in types:
+                        types.append(pt)
+            entry["Types"] = types
+
+        # Flags from port definition
+        if port_def and port_def.get("flags"):
+            flag_list = [f for f in port_def["flags"] if f != "uneditable"]
+            if flag_list:
+                entry["Flags"] = flag_list
+
+        if "gimbal" in entity_class.lower() or "turret" in full_type.lower():
+            entry["Gimballed"] = True
+
+        # PortTags from vehicle impl port definition
+        if port_def:
+            pt = port_def.get("portTags", "")
+            if pt:
+                entry["PortTags"] = pt.split()
+            rt = port_def.get("requiredPortTags", "")
+            if rt:
+                entry["RequiredTags"] = [f"${t}" if not t.startswith("$") else t
+                                         for t in rt.split()]
+
+        # RequiredTags from item AttachDef (if not from port_def)
+        if "RequiredTags" not in entry:
+            req_str = ad.get("requiredTags", "")
+            if req_str:
+                entry["RequiredTags"] = [f"${t}" if not t.startswith("$") else t
+                                         for t in req_str.split()]
+
+        # Build sub-ports from children
+        # Sub-port Tags come from THIS item's AttachDef tags (the parent),
+        # describing the port's capability, not the installed child's tags
+        parent_tags_str = ad.get("tags", "")
+        parent_tags = parent_tags_str.split() if parent_tags_str else []
+
+        if children:
+            sub_items = []
+            for child in children:
+                child_class, child_record = _resolve_entry(child, ctx)
+                child_children = child.get("children", [])
+                # Pass parent item's sub-port definitions for tags
+                child_port_def = None
+                child_ports = item_record.get("components", {}).get("ports", [])
+                child_pn = child.get("portName", "")
+                for cp in child_ports:
+                    if cp.get("name", "") == child_pn:
+                        child_port_def = cp
+                        break
+                sub = _build_standard_entry(
+                    child_pn, child_class, child_record, child_children, ctx,
+                    child_port_def, parent_tags
+                )
+                if sub:
+                    sub_items.append(sub)
+            if sub_items:
+                entry["Ports"] = sub_items
+
+    elif entity_class:
+        entry["Loadout"] = entity_class
+
+    entry["Uneditable"] = False
+    return entry
+
+
+def _build_thruster_entry(port_name, entity_class, item_record, ctx):
+    """Build a thruster entry (different format from standard hardpoints)."""
+    entry = {
+        "Name": port_name,
+        "Uneditable": True,
+    }
+
+    if item_record:
+        ad = item_record.get("attachDef", {})
+        comps = item_record.get("components", {})
+        physics = comps.get("physics", {})
+        health_comp = comps.get("health", {})
+
+        entry["Size"] = ad.get("size", 0)
+        entry["Mass"] = physics.get("mass", 0)
+        entry["Grade"] = ad.get("grade", 0)
+
+        # Thruster-specific params
+        thruster_comp = comps.get("SCItemThrusterParams", {})
+        if thruster_comp:
+            tc = safe_float(thruster_comp.get("thrustCapacity", "0"))
+            if tc:
+                entry["ThrustCapacity"] = tc
+
+            # Fuel burn rate from resource network variant
+            rn = thruster_comp.get("fuelBurnRatePer10KNewtonRN", {})
+            sru = rn.get("SStandardResourceUnit", {}) if isinstance(rn, dict) else {}
+            rate_rn = safe_float(sru.get("standardResourceUnits", "0")) if isinstance(sru, dict) else 0
+            if rate_rn:
+                entry["FuelBurnRatePerMN"] = round(rate_rn * 1e8, 4)
+                if tc:
+                    entry["FuelUsagePerSecond"] = round(tc * rate_rn * 100, 4)
+
+        if health_comp:
+            entry["Durability"] = {"Health": health_comp.get("health", 0)}
+
+    return entry
+
+
+def _build_cm_entry(port_name, entity_class, item_record, ctx):
+    """Build a countermeasure entry."""
+    entry = {
+        "Name": ctx.resolve_name(item_record.get("attachDef", {}).get("name", "")) if item_record else port_name,
+        "Uneditable": True,
+    }
+
+    if item_record:
+        ad = item_record.get("attachDef", {})
+        comps = item_record.get("components", {})
+
+        entry["Size"] = ad.get("size", 0)
+        entry["Grade"] = ad.get("grade", 0)
+
+        physics = comps.get("physics", {})
+        if physics:
+            entry["Mass"] = physics.get("mass", 0)
+
+        # Ammo data for countermeasure
+        ammo_comp = comps.get("ammo", {})
+        if ammo_comp:
+            entry["Ammunition"] = ammo_comp.get("maxAmmoCount", 0)
+            ammo_data = ctx.get_ammo(ammo_comp.get("ammoParamsRecord", ""))
+            if ammo_data:
+                entry["Speed"] = ammo_data.get("speed", 0)
+                lifetime = ammo_data.get("lifetime", 0)
+                entry["Range"] = ammo_data.get("speed", 0) * lifetime
+
+        # Type from item type
+        item_type = ad.get("type", "")
+        if "noise" in entity_class.lower() or "chaff" in entity_class.lower():
+            entry["Type"] = "Noise"
+        elif "flare" in entity_class.lower() or "decoy" in entity_class.lower():
+            entry["Type"] = "Decoy"
+        else:
+            entry["Type"] = item_type
+
+    return entry
+
+
+def _build_simple_entry(port_name, entity_class, item_record, ctx):
+    """Build a simple entry for fuel tanks, intakes, etc."""
+    entry = {
+        "Name": port_name,
+        "Uneditable": True,
+    }
+
+    if item_record:
+        ad = item_record.get("attachDef", {})
+        entry["Size"] = ad.get("size", 0)
+        entry["Grade"] = ad.get("grade", 0)
+
+    return entry
+
+
+def _build_storage_entry(port_name, entity_class, item_record, ctx):
+    """Build a storage entry."""
+    entry = {
+        "Name": ctx.resolve_name(item_record.get("attachDef", {}).get("name", "")) if item_record else port_name,
+        "Uneditable": True,
+    }
+
+    if item_record:
+        ad = item_record.get("attachDef", {})
+        entry["Size"] = ad.get("size", 0)
+        entry["Grade"] = ad.get("grade", 0)
+        # Capacity from cargo volume
+        if ad.get("volume"):
+            entry["Capacity"] = round(ad["volume"] / 1000000.0, 2)  # microSCU to SCU
+
+    return entry
+
+
+def _full_type(attach_def):
+    """Build full type string."""
+    t = attach_def.get("type", "")
+    st = attach_def.get("subType", "")
+    if t and st and st != "UNDEFINED":
+        return f"{t}.{st}"
+    return t
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Tree placement
+# ──────────────────────────────────────────────────────────────────────
+
+_PLACEMENT = {
+    # Weapons
+    "PilotWeapons":         ("Weapons", "PilotWeapons"),
+    "Turrets":              ("Weapons", "MannedTurrets"),  # Default; could be refined
+    "MissileRacks":         ("Weapons", "MissileRacks"),
+    "BombRacks":            ("Weapons", "BombRacks"),
+    "InterdictionHardpoints": ("Weapons", "InterdictionHardpoints"),
+    "MiningHardpoints":     ("Weapons", "MiningHardpoints"),
+    "SalvageHardpoints":    ("Weapons", "SalvageHardpoints"),
+    "UtilityHardpoints":    ("Weapons", "UtilityHardpoints"),
+    # Components > Propulsion
+    "PowerPlants":          ("Components", "Propulsion", "PowerPlants"),
+    "QuantumDrives":        ("Components", "Propulsion", "QuantumDrives"),
+    "MainThrusters":        ("Components", "Propulsion", "Thrusters", "MainThrusters"),
+    "RetroThrusters":       ("Components", "Propulsion", "Thrusters", "RetroThrusters"),
+    "VtolThrusters":        ("Components", "Propulsion", "Thrusters", "VtolThrusters"),
+    "ManeuveringThrusters": ("Components", "Propulsion", "Thrusters", "ManeuveringThrusters"),
+    "QuantumFuelTanks":     ("Components", "Propulsion", "QuantumFuelTanks"),
+    "HydrogenFuelTanks":    ("Components", "Propulsion", "HydrogenFuelTanks"),
+    # Components > Systems
+    "ShieldControllers":    ("Components", "Systems", "Controllers"),
+    "Shields":              ("Components", "Systems", "Shields"),
+    "Coolers":              ("Components", "Systems", "Coolers"),
+    "LifeSupport":          ("Components", "Systems", "LifeSupport"),
+    "FuelIntakes":          ("Components", "Systems", "FuelIntakes"),
+    "Countermeasures":      ("Components", "Systems", "Countermeasures"),
+    # Components > Avionics
+    "FlightBlade":          ("Components", "Avionics", "FlightBlade"),
+    "Radars":               ("Components", "Avionics", "Radars"),
+    "SelfDestruct":         ("Components", "Avionics", "SelfDestruct"),
+    # Components > Other
+    "Modules":              ("Components", "Modules"),
+    "Storage":              ("Components", "Storage"),
+    "WeaponsRacks":         ("Components", "WeaponsRacks"),
+    "Paints":               ("Components", "Paints"),
+    "Flairs":               ("Components", "Flairs"),
+    "Armor":                ("Components", "Armor"),
+    "CargoGrids":           ("Components", "CargoGrids"),
+}
+
+
+def _place(tree, category, entry):
+    """Place a hardpoint entry into the correct position in the tree."""
+    path = _PLACEMENT.get(category)
+    if not path:
+        return
+
+    node = tree
+    for key in path:
+        if key not in node:
+            node[key] = {"InstalledItems": []}
+        node = node[key]
+
+    if "InstalledItems" in node:
+        node["InstalledItems"].append(entry)
+    elif isinstance(node, dict):
+        node.setdefault("InstalledItems", []).append(entry)
+
+
+def _update_counts(tree):
+    """Recursively update Hardpoints/ItemsQuantity counts."""
+    if not isinstance(tree, dict):
+        return
+    for key, val in tree.items():
+        if isinstance(val, dict):
+            _update_counts(val)
+            if "InstalledItems" in val:
+                count = len(val["InstalledItems"])
+                if "Hardpoints" in val:
+                    val["Hardpoints"] = count
+                elif "ItemsQuantity" in val:
+                    val["ItemsQuantity"] = count

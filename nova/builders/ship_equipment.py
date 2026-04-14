@@ -1,0 +1,126 @@
+"""Build ship equipment JSON with full stdItem data."""
+
+from .stditem import build_std_item
+
+
+def _is_non_equippable(class_name):
+    """Filter out items that can't be equipped on player ships/vehicles."""
+    cn = class_name.lower()
+
+    # Templates
+    if cn.endswith("_template") or "_template_" in cn:
+        return True
+
+    # Test/debug items
+    if cn.startswith("test_") or "_test_" in cn or cn.startswith("master_"):
+        return True
+
+    # Low-poly / hologram / fake / dummy
+    if "lowpoly" in cn or "fakehologram" in cn or "_dummy" in cn or "_fake" in cn:
+        return True
+
+    # NPC-only turrets and defense installations
+    if "colonialism_" in cn or "pudefenseturret" in cn or "orbital_sentry" in cn:
+        return True
+    if "destructible_pu" in cn or "_ground_destructible" in cn:
+        return True
+
+    # NPC Vanduul AI flight controllers
+    if "_pu_ai_van" in cn:
+        return True
+
+    return False
+
+
+# Item types to INCLUDE (meaningful ship/vehicle equipment)
+_INCLUDED_TYPES = {
+    # Weapons
+    "WeaponGun", "WeaponDefensive", "WeaponMining", "WeaponSalvage",
+    # Launchers
+    "MissileLauncher", "BombLauncher", "GroundVehicleMissileLauncher",
+    # Ordnance
+    "Missile", "Bomb",
+    # Turrets
+    "Turret", "TurretBase", "UtilityTurret",
+    # Defense
+    "Shield", "Armor",
+    # Power & Cooling
+    "PowerPlant", "Cooler",
+    # Drives
+    "QuantumDrive", "JumpDrive",
+    # Avionics
+    "Radar", "Scanner",
+    # Controllers
+    "FlightController", "ShieldController", "WheeledController",
+    # Modules
+    "Module", "Container",
+    # Utility
+    "LifeSupportGenerator", "EMP", "SelfDestruct",
+    "QuantumInterdictionGenerator", "TractorBeam", "TowingBeam",
+    "MiningModifier", "SalvageModifier", "SalvageHead", "SalvageFieldEmitter",
+    "ToolArm", "Gadget",
+    # Paints & Flairs
+    "Paints", "Flair_Cockpit",
+}
+
+
+def build_ship_equipment(ctx):
+    """Build the ship equipment output dataset with full stdItem.
+
+    Args:
+        ctx: BuildContext
+
+    Returns:
+        List of equipment item dicts
+    """
+    equipment = []
+
+    for class_name, record in ctx.items.items():
+        attach_def = record.get("attachDef")
+        if not attach_def:
+            continue
+
+        item_type = attach_def.get("type", "")
+        if not item_type:
+            continue
+
+        base_type = item_type.split(".")[0] if "." in item_type else item_type
+        if base_type not in _INCLUDED_TYPES:
+            continue
+
+        # Skip FPS items (handled by fps_weapons/fps_attachments)
+        path = record.get("path", "").lower()
+        if "personal" in item_type.lower() or "fps" in path:
+            continue
+
+        # Skip non-equippable items: templates, test items, NPC-only, low-poly, dummies
+        if _is_non_equippable(class_name):
+            continue
+
+        sub_type = attach_def.get("subType", "")
+        full_type = f"{item_type}.{sub_type}" if sub_type and sub_type != "UNDEFINED" else item_type
+
+        mfr_guid = attach_def.get("manufacturerGuid", "")
+        mfr = ctx.get_manufacturer(mfr_guid)
+
+        equip = {
+            "className": class_name,
+            "reference": record.get("guid", ""),
+            "itemName": class_name.lower(),
+            "type": item_type,
+            "subType": sub_type,
+            "tags": attach_def.get("tags", ""),
+            "requiredTags": attach_def.get("requiredTags", ""),
+            "size": attach_def.get("size", 0),
+            "grade": attach_def.get("grade", 0),
+            "name": attach_def.get("name", ""),
+            "manufacturer": mfr["Code"] if mfr else "",
+            "classification": "",
+            "stdItem": build_std_item(record, ctx),
+        }
+
+        equipment.append(equip)
+
+    equipment.sort(key=lambda e: (e.get("type", ""), e.get("size", 0), e.get("className", "")))
+    print(f"  Built {len(equipment)} ship equipment items")
+    return equipment
