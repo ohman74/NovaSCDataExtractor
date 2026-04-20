@@ -14,12 +14,14 @@ def parse_localization(ini_path):
 
     with open(ini_path, "r", encoding="utf-8-sig") as f:
         for line in f:
-            line = line.strip()
-            if not line or line.startswith(";") or line.startswith("#"):
+            line = line.rstrip("\r\n")
+            stripped = line.strip()
+            if not stripped or stripped.startswith(";") or stripped.startswith("#"):
                 continue
             if "=" in line:
                 key, _, value = line.partition("=")
-                translations[key.strip()] = value.strip()
+                # Preserve trailing whitespace in value but strip trailing newline only
+                translations[key.strip()] = value
 
     return translations
 

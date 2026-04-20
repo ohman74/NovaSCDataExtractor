@@ -125,6 +125,54 @@ def get_entity_files(config, entity_type="spaceships"):
     return files
 
 
+def get_vehicle_impl_files(config):
+    """Get list of vehicle implementation XML files (CryXML binary)."""
+    impl_dir = os.path.join(config.cache_dir, "Data", "Scripts", "Entities",
+                            "Vehicles", "Implementations", "Xml")
+    if not os.path.isdir(impl_dir):
+        return []
+    return [os.path.join(impl_dir, f) for f in os.listdir(impl_dir) if f.endswith(".xml")]
+
+
+# Directories known to contain CryXML-binary .xml files (magic bytes "CryXmlB").
+# These files have .xml extension but are binary and MUST be converted with
+# unforge.exe before they can be read as text XML. This list is scanned after
+# the initial unp4k extraction to ensure all binary XMLs get converted in one
+# pass. Extend this list when new CryXML-bearing directories are discovered.
+CRYXML_BINARY_DIRS = [
+    os.path.join("Data", "Libs", "Foundry", "Records", "entities", "spaceships"),
+    os.path.join("Data", "Libs", "Foundry", "Records", "entities", "ground"),
+    os.path.join("Data", "Scripts", "Entities", "Vehicles", "Implementations", "Xml"),
+]
+
+
+def scan_cryxml_binaries(config):
+    """Scan the cache for CryXML-binary .xml files under known directories.
+
+    Called after unp4k extraction. Any .xml file whose first 8 bytes begin with
+    "CryXml" is binary and needs conversion via unforge.exe. Returns a list of
+    file paths that should be passed to convert_entities().
+    """
+    binary_files = []
+    for rel in CRYXML_BINARY_DIRS:
+        root_dir = os.path.join(config.cache_dir, rel)
+        if not os.path.isdir(root_dir):
+            continue
+        for root, dirs, files in os.walk(root_dir):
+            for f in files:
+                if not f.endswith(".xml"):
+                    continue
+                path = os.path.join(root, f)
+                try:
+                    with open(path, "rb") as fh:
+                        head = fh.read(8)
+                except OSError:
+                    continue
+                if head.startswith(b"CryXml"):
+                    binary_files.append(path)
+    return binary_files
+
+
 def get_localization_file(config):
     """Get the English localization file path from cache."""
     candidates = [

@@ -82,16 +82,9 @@ def build_fps_attachments(ctx):
 
         all_attachments[class_name] = record
 
-    # Second pass: filter skin variants with identical modifier stats
+    # Second pass: build all attachments (ref includes color/tint variants)
     attachments = []
     for class_name, record in all_attachments.items():
-        base_cn = _find_base_attachment(class_name, all_attachments)
-        if base_cn:
-            base_sig = _modifier_signature(all_attachments[base_cn])
-            var_sig = _modifier_signature(record)
-            if base_sig == var_sig:
-                continue  # Same modifiers, skin-only variant
-
         attach_def = record.get("attachDef", {})
         mfr_guid = attach_def.get("manufacturerGuid", "")
         mfr = ctx.get_manufacturer(mfr_guid)

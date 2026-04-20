@@ -151,27 +151,59 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
             in_record = False
             guid = elem.get("__ref", "")
             if guid:
-                cap_elem = elem.find(".//SStandardCargoUnit")
+                # Prefer SCentiCargoUnit (1/100 SCU) over others
+                cap_elem = elem.find(".//SCentiCargoUnit")
+                cap_scale = 0.01 if cap_elem is not None else 1.0
+                if cap_elem is None:
+                    cap_elem = elem.find(".//SStandardCargoUnit")
+                    cap_scale = 1.0
                 if cap_elem is None:
                     cap_elem = elem.find(".//SMicroCargoUnit")
+                    cap_scale = 1e-6
                 capacity = 0
                 if cap_elem is not None:
-                    capacity = safe_float(cap_elem.get("standardCargoUnits",
-                                          cap_elem.get("microSCU", "0")))
-                    if cap_elem.tag == "SMicroCargoUnit":
-                        capacity = capacity / 1000000.0  # microSCU to SCU
+                    raw = safe_float(cap_elem.get("standardCargoUnits",
+                                     cap_elem.get("centiSCU",
+                                     cap_elem.get("microSCU", "0"))))
+                    capacity = raw * cap_scale
 
-                # Fallback: compute SCU from interiorDimensions grid-fit
-                if not capacity:
-                    dim_elem = elem.find("interiorDimensions")
-                    if dim_elem is not None:
-                        dx = safe_float(dim_elem.get("x", "0"))
-                        dy = safe_float(dim_elem.get("y", "0"))
-                        dz = safe_float(dim_elem.get("z", "0"))
-                        if dx and dy and dz:
-                            capacity = int(dx / 1.25) * int(dy / 1.25) * int(dz / 1.25)
+                # Capture interiorDimensions for CargoGrid Width/Height/Depth calc
+                interior = None
+                dim_elem = elem.find("interiorDimensions")
+                if dim_elem is not None:
+                    interior = {
+                        "x": safe_float(dim_elem.get("x", "0")),
+                        "y": safe_float(dim_elem.get("y", "0")),
+                        "z": safe_float(dim_elem.get("z", "0")),
+                    }
 
-                inventory_containers[guid] = {"capacity": capacity}
+                # Fallback: compute SCU from dimensions grid-fit
+                if not capacity and interior:
+                    dx, dy, dz = interior["x"], interior["y"], interior["z"]
+                    if dx and dy and dz:
+                        capacity = int(dx / 1.25) * int(dy / 1.25) * int(dz / 1.25)
+
+                # Capture min/max permitted item sizes (for CargoGrid MinContainerSize/MaxContainerSize)
+                def _vec3(name):
+                    e = elem.find(".//" + name)
+                    if e is None:
+                        return None
+                    return {
+                        "x": safe_float(e.get("x", "0")),
+                        "y": safe_float(e.get("y", "0")),
+                        "z": safe_float(e.get("z", "0")),
+                    }
+                min_size = _vec3("minPermittedItemSize")
+                max_size = _vec3("maxPermittedItemSize")
+
+                entry = {"capacity": capacity}
+                if interior:
+                    entry["interiorDimensions"] = interior
+                if min_size:
+                    entry["minPermittedItemSize"] = min_size
+                if max_size:
+                    entry["maxPermittedItemSize"] = max_size
+                inventory_containers[guid] = entry
             elem.clear()
 
         elif elem_type == "WeaponGimbalModeModifierDef":
@@ -224,84 +256,87 @@ def _parse_ammo_params(elem):
         "size": safe_int(elem.get("size")),
     }
 
-    # Find BulletProjectileParams for damage data
-    for bullet in elem.iter("BulletProjectileParams"):
-        # Damage
-        dmg = bullet.find("damage")
-        if dmg is not None:
-            dmg_info = dmg.find("DamageInfo")
-            if dmg_info is None:
-                for child in dmg:
-                    dmg_info = child
-                    break
-            if dmg_info is not None:
-                result["damage"] = {
-                    "physical": safe_float(dmg_info.get("DamagePhysical")),
-                    "energy": safe_float(dmg_info.get("DamageEnergy")),
-                    "distortion": safe_float(dmg_info.get("DamageDistortion")),
-                    "thermal": safe_float(dmg_info.get("DamageThermal")),
-                    "biochemical": safe_float(dmg_info.get("DamageBiochemical")),
-                    "stun": safe_float(dmg_info.get("DamageStun")),
+    # Projectile-type variants: BulletProjectileParams, TachyonProjectileParams, etc.
+    # All share the same damage/penetration sub-structure.
+    projectile_types = ("BulletProjectileParams", "TachyonProjectileParams",
+                         "LaserProjectileParams", "MissileProjectileParams")
+    for p_type in projectile_types:
+        for bullet in elem.iter(p_type):
+            # Damage
+            dmg = bullet.find("damage")
+            if dmg is not None:
+                dmg_info = dmg.find("DamageInfo")
+                if dmg_info is None:
+                    for child in dmg:
+                        dmg_info = child
+                        break
+                if dmg_info is not None:
+                    result["damage"] = {
+                        "physical": safe_float(dmg_info.get("DamagePhysical")),
+                        "energy": safe_float(dmg_info.get("DamageEnergy")),
+                        "distortion": safe_float(dmg_info.get("DamageDistortion")),
+                        "thermal": safe_float(dmg_info.get("DamageThermal")),
+                        "biochemical": safe_float(dmg_info.get("DamageBiochemical")),
+                        "stun": safe_float(dmg_info.get("DamageStun")),
+                    }
+
+            # Detonation damage
+            det = bullet.find("detonationParams")
+            if det is not None:
+                det_dmg = det.find(".//DamageInfo")
+                if det_dmg is not None:
+                    result["detonationDamage"] = {
+                        "physical": safe_float(det_dmg.get("DamagePhysical")),
+                        "energy": safe_float(det_dmg.get("DamageEnergy")),
+                        "distortion": safe_float(det_dmg.get("DamageDistortion")),
+                    }
+                # Explosion radius from ExplosionParams attributes (minRadius/maxRadius)
+                exp_params = det.find(".//ExplosionParams")
+                if exp_params is None:
+                    exp_params = det.find(".//explosionParams")
+                if exp_params is not None:
+                    min_r = safe_float(exp_params.get("minRadius", "0"))
+                    max_r = safe_float(exp_params.get("maxRadius", "0"))
+                    if min_r:
+                        result["explosionRadiusMin"] = min_r
+                    if max_r:
+                        result["explosionRadiusMax"] = max_r
+
+            # Penetration
+            pen = bullet.find("penetrationParams")
+            if pen is not None:
+                result["penetration"] = {
+                    "basePenetrationDistance": safe_float(pen.get("basePenetrationDistance")),
+                    "nearRadius": safe_float(pen.get("nearRadius")),
+                    "farRadius": safe_float(pen.get("farRadius")),
                 }
 
-        # Detonation damage
-        det = bullet.find("detonationParams")
-        if det is not None:
-            det_dmg = det.find(".//DamageInfo")
-            if det_dmg is not None:
-                result["detonationDamage"] = {
-                    "physical": safe_float(det_dmg.get("DamagePhysical")),
-                    "energy": safe_float(det_dmg.get("DamageEnergy")),
-                    "distortion": safe_float(det_dmg.get("DamageDistortion")),
-                }
-            # Explosion radius from ExplosionParams attributes (minRadius/maxRadius)
-            exp_params = det.find(".//ExplosionParams")
-            if exp_params is None:
-                exp_params = det.find(".//explosionParams")
-            if exp_params is not None:
-                min_r = safe_float(exp_params.get("minRadius", "0"))
-                max_r = safe_float(exp_params.get("maxRadius", "0"))
-                if min_r:
-                    result["explosionRadiusMin"] = min_r
-                if max_r:
-                    result["explosionRadiusMax"] = max_r
+            # Damage drop (distance-based damage falloff)
+            drop = bullet.find(".//BulletDamageDropParams")
+            if drop is not None:
+                drop_result = {}
+                for field, key in [("damageDropMinDistance", "minDistance"),
+                                   ("damageDropPerMeter", "dropPerMeter"),
+                                   ("damageDropMinDamage", "minDamage")]:
+                    field_elem = drop.find(field)
+                    if field_elem is not None:
+                        dmg_info = field_elem.find("DamageInfo")
+                        if dmg_info is not None:
+                            vals = {}
+                            for dt in ["Physical", "Energy", "Distortion", "Thermal",
+                                       "Biochemical", "Stun"]:
+                                v = safe_float(dmg_info.get(f"Damage{dt}"))
+                                if v:
+                                    vals[dt] = v
+                            if vals:
+                                drop_result[key] = vals
+                if drop_result:
+                    result["damageDrop"] = drop_result
 
-        # Penetration
-        pen = bullet.find("penetrationParams")
-        if pen is not None:
-            result["penetration"] = {
-                "basePenetrationDistance": safe_float(pen.get("basePenetrationDistance")),
-                "nearRadius": safe_float(pen.get("nearRadius")),
-                "farRadius": safe_float(pen.get("farRadius")),
-            }
-
-        # Damage drop (distance-based damage falloff)
-        drop = bullet.find(".//BulletDamageDropParams")
-        if drop is not None:
-            drop_result = {}
-            for field, key in [("damageDropMinDistance", "minDistance"),
-                               ("damageDropPerMeter", "dropPerMeter"),
-                               ("damageDropMinDamage", "minDamage")]:
-                field_elem = drop.find(field)
-                if field_elem is not None:
-                    dmg_info = field_elem.find("DamageInfo")
-                    if dmg_info is not None:
-                        vals = {}
-                        for dt in ["Physical", "Energy", "Distortion"]:
-                            v = safe_float(dmg_info.get(f"Damage{dt}"))
-                            if v:
-                                vals[dt] = v
-                        if vals:
-                            drop_result[key] = vals
-            if drop_result:
-                result["damageDrop"] = drop_result
-
-        # Pierceability
-        pierce = bullet.find("pierceabilityParams")
-        if pierce is not None:
-            result["maxPenetrationThickness"] = safe_float(pierce.get("maxPenetrationThickness"))
-
-        break  # Only process first BulletProjectileParams
+            # Pierceability
+            pierce = bullet.find("pierceabilityParams")
+            if pierce is not None:
+                result["maxPenetrationThickness"] = safe_float(pierce.get("maxPenetrationThickness"))
 
     # CounterMeasure params (in CounterMeasureProjectileParams, not BulletProjectileParams)
     for cm_type in ["CounterMeasureChaffParams", "CounterMeasureFlareParams"]:
@@ -374,6 +409,7 @@ def _parse_entity_record(elem, class_name, guid, path):
                 "maxAmmoCount": safe_int(comp.get("maxAmmoCount")),
                 "initialAmmoCount": safe_int(comp.get("initialAmmoCount")),
                 "ammoParamsRecord": comp.get("ammoParamsRecord", ""),
+                "allowAmmoRepool": comp.get("allowAmmoRepool", "0") == "1",
             }
 
         elif poly_type == "EntityComponentPowerConnection":
@@ -514,6 +550,9 @@ def _parse_vehicle_params(comp):
         "isGravlevVehicle": safe_bool(comp.get("isGravlevVehicle")),
         "manufacturerGuid": comp.get("manufacturer", ""),
         "vehicleDefinition": comp.get("vehicleDefinition", ""),
+        # Penetration multipliers for Hull.PenetrationDamageMultiplier
+        "fusePenetrationDamageMultiplier": safe_float(comp.get("fusePenetrationDamageMultiplier", "1")),
+        "componentPenetrationDamageMultiplier": safe_float(comp.get("componentPenetrationDamageMultiplier", "1")),
     }
 
     # Bounding box = dimensions
@@ -556,6 +595,31 @@ def _parse_weapon_params(comp):
     gimbal_guid = comp.get("gimbalModeModifierRecord", "")
     if gimbal_guid and gimbal_guid != "00000000-0000-0000-0000-000000000000":
         result["gimbalModeModifierRecord"] = gimbal_guid
+
+    # Ammo repool params (FPS weapons — SWeaponAmmoRepoolParams)
+    repool = comp.find(".//SWeaponAmmoRepoolParams")
+    if repool is None:
+        repool = comp.find("ammoRepoolParams")
+    if repool is not None:
+        result["ammoRepool"] = {
+            "bulletsPerSecond": safe_float(repool.get("bulletsPerSecond")),
+            "unstowMagDuration": safe_float(repool.get("unstowMagDuration")),
+            "fullMagMergeDuration": safe_float(repool.get("fullMagMergeDuration")),
+        }
+
+    # Aim modifier spread (FPS weapons — from aimAction > aimModifier > weaponStats > spreadModifier)
+    # Applies to all firing modes uniformly.
+    aim_action = comp.find("aimAction")
+    if aim_action is not None:
+        aim_spread = aim_action.find(".//aimModifier/SWeaponModifierParams/weaponStats/spreadModifier")
+        if aim_spread is not None:
+            result["aimSpreadModifier"] = {
+                "min": safe_float(aim_spread.get("minMultiplier", "0")),
+                "max": safe_float(aim_spread.get("maxMultiplier", "0")),
+                "firstAttack": safe_float(aim_spread.get("firstAttackMultiplier", "0")),
+                "attack": safe_float(aim_spread.get("attackMultiplier", "0")),
+                "decay": safe_float(aim_spread.get("decayMultiplier", "0")),
+            }
 
     # Weapon regen consumer params (ammo pool / capacitor)
     regen_elem = comp.find(".//SWeaponRegenConsumerParams")
@@ -602,88 +666,251 @@ def _parse_weapon_params(comp):
                     "heatGenerationMultiplier": safe_float(stats_elem.get("heatGenerationMultiplier")),
                 }
 
-    # Firing modes from weapon action params
-    # Track which elements are wrapped (inside sequence or charged) to avoid double-counting
+    # Firing modes from weapon action params — walk top-level children of <fireActions>
+    # in XML order so the output preserves the order ref uses.
     firing_modes = []
-    wrapped_children = set()
 
-    # First pass: find sequence wrappers — take only the first inner fire action
-    for seq in comp.iter("SWeaponActionSequenceParams"):
-        wrapped_children.add(id(seq))
-        first_found = False
-        for fire_type in ["SWeaponActionFireSingleParams", "SWeaponActionFireRapidParams",
-                          "SWeaponActionFireBurstParams", "SWeaponActionFireChargedParams"]:
-            for action in seq.iter(fire_type):
-                wrapped_children.add(id(action))
-                if not first_found:
-                    mode = _parse_fire_action(action)
-                    if mode:
-                        mode["fireType"] = "sequence"
-                        firing_modes.append(mode)
-                        first_found = True
+    fire_actions_elem = comp.find("fireActions")
+    if fire_actions_elem is None:
+        fire_actions_elem = comp
 
-    # Second pass: find charged wrappers and their child fire actions
-    for charged in comp.iter("SWeaponActionFireChargedParams"):
-        if id(charged) in wrapped_children:
+    _top_tag_to_type = {
+        "SWeaponActionFireSingleParams": "single",
+        "SWeaponActionFireRapidParams": "rapid",
+        "SWeaponActionFireBurstParams": "burst",
+    }
+
+    for child in list(fire_actions_elem):
+        tag = child.tag
+
+        if tag == "SWeaponActionDynamicConditionParams":
+            # rapidBeam-style weapon: emit a top-level mode with DefaultWeaponAction
+            # and optional ConditionalWeaponActions sub-dicts.
+            mode = {
+                "name": child.get("name", ""),
+                "localisedName": child.get("localisedName", ""),
+                "fireType": "rapidBeam",
+            }
+            default_act = child.find("defaultWeaponAction")
+            if default_act is not None:
+                for sub in list(default_act):
+                    inner_mode = _parse_dynamic_inner(sub)
+                    if inner_mode:
+                        mode["defaultWeaponAction"] = inner_mode
+                        break
+            cond_acts = child.find("conditionalWeaponActions")
+            if cond_acts is not None:
+                first_cwa = cond_acts.find("SConditionalWeaponAction")
+                if first_cwa is not None:
+                    inner = first_cwa.find("weaponAction")
+                    if inner is not None:
+                        for sub in list(inner):
+                            inner_mode = _parse_dynamic_inner(sub)
+                            if inner_mode:
+                                mode["conditionalWeaponActions"] = inner_mode
+                                break
+            firing_modes.append(mode)
             continue
-        wrapped_children.add(id(charged))
-        # Parse the inner fire action (single/rapid/burst inside charged)
-        found_inner = False
-        for fire_type in ["SWeaponActionFireSingleParams", "SWeaponActionFireRapidParams",
-                          "SWeaponActionFireBurstParams"]:
-            for action in charged.iter(fire_type):
-                mode = _parse_fire_action(action)
+
+        if tag == "SWeaponActionSequenceParams":
+            # Sequence wrapper — first inner fire action becomes the mode, plus entries.
+            seq_entries = []
+            for entry in child.iter("SWeaponSequenceEntryParams"):
+                seq_entries.append({
+                    "delay": safe_float(entry.get("delay")),
+                    "unit": entry.get("unit", ""),
+                    "repetitions": safe_int(entry.get("repetitions", "1")),
+                })
+            inner_action = None
+            for inner_tag in ("SWeaponActionFireSingleParams", "SWeaponActionFireRapidParams",
+                              "SWeaponActionFireBurstParams", "SWeaponActionFireChargedParams"):
+                found = child.iter(inner_tag)
+                inner_action = next(found, None)
+                if inner_action is not None:
+                    break
+            if inner_action is not None:
+                mode = _parse_fire_action(inner_action)
                 if mode:
-                    mode["fireType"] = "charged"
-                    # Override name/localisedName with charged wrapper values
-                    charged_name = charged.get("name", "")
-                    charged_loc = charged.get("localisedName", "")
-                    if charged_name:
-                        mode["name"] = charged_name
-                    if charged_loc:
-                        mode["localisedName"] = charged_loc
-                    # Copy charge params from the wrapper
-                    mode["chargeTime"] = safe_float(charged.get("chargeTime"))
-                    mode["overchargeTime"] = safe_float(charged.get("overchargeTime"))
-                    mode["overchargedTime"] = safe_float(charged.get("overchargedTime"))
-                    mode["cooldownTime"] = safe_float(charged.get("cooldownTime"))
-                    mode["fireOnFullCharge"] = charged.get("fireAutomaticallyOnFullCharge") == "1"
-                    mode["fireOnlyOnFullCharge"] = charged.get("fireOnlyOnFullCharge") == "1"
-                    # maxChargeModifier stats
-                    mcm = charged.find("maxChargeModifier")
-                    if mcm is not None:
-                        mode["chargeModifiers"] = {
-                            "fireRateMultiplier": safe_float(mcm.get("fireRateMultiplier", "1")),
-                            "projectileSpeedMultiplier": safe_float(mcm.get("projectileSpeedMultiplier", "1")),
-                            "damageMultiplier": safe_float(mcm.get("damageMultiplier", "1")),
-                            "damageOverTimeMultiplier": safe_float(mcm.get("damageOverTimeMultiplier", "1")),
-                        }
+                    mode["fireType"] = "sequence"
+                    if seq_entries:
+                        mode["sequenceEntries"] = seq_entries
                     firing_modes.append(mode)
-                    wrapped_children.add(id(action))
-                    found_inner = True
-        if not found_inner:
-            # Charged element itself has fire data
-            mode = _parse_fire_action(charged)
+
+        elif tag == "SWeaponActionFireChargedParams":
+            # Charged wrapper with inner fire action
+            inner_action = None
+            for inner_tag in ("SWeaponActionFireSingleParams", "SWeaponActionFireRapidParams",
+                              "SWeaponActionFireBurstParams"):
+                found = child.iter(inner_tag)
+                inner_action = next(found, None)
+                if inner_action is not None:
+                    break
+            if inner_action is not None:
+                mode = _parse_fire_action(inner_action)
+            else:
+                mode = _parse_fire_action(child)
             if mode:
                 mode["fireType"] = "charged"
+                # Override name/localisedName with charged wrapper values
+                c_name = child.get("name", "")
+                c_loc = child.get("localisedName", "")
+                if c_name:
+                    mode["name"] = c_name
+                if c_loc:
+                    mode["localisedName"] = c_loc
+                mode["chargeTime"] = safe_float(child.get("chargeTime"))
+                mode["overchargeTime"] = safe_float(child.get("overchargeTime"))
+                mode["overchargedTime"] = safe_float(child.get("overchargedTime"))
+                mode["cooldownTime"] = safe_float(child.get("cooldownTime"))
+                mode["fireOnFullCharge"] = child.get("fireAutomaticallyOnFullCharge") == "1"
+                mode["fireOnlyOnFullCharge"] = child.get("fireOnlyOnFullCharge") == "1"
+                mcm = child.find("maxChargeModifier")
+                if mcm is not None:
+                    mode["chargeModifiers"] = {
+                        "fireRateMultiplier": safe_float(mcm.get("fireRateMultiplier", "1")),
+                        "projectileSpeedMultiplier": safe_float(mcm.get("projectileSpeedMultiplier", "1")),
+                        "damageMultiplier": safe_float(mcm.get("damageMultiplier", "1")),
+                        "damageOverTimeMultiplier": safe_float(mcm.get("damageOverTimeMultiplier", "1")),
+                        "pellets": safe_int(mcm.get("pellets", "0")),
+                    }
                 firing_modes.append(mode)
 
-    # Third pass: top-level fire actions (not inside any wrapper)
-    for fire_type, ft_name in [("SWeaponActionFireSingleParams", "single"),
-                                ("SWeaponActionFireRapidParams", "rapid"),
-                                ("SWeaponActionFireBurstParams", "burst")]:
-        for action in comp.iter(fire_type):
-            if id(action) in wrapped_children:
-                continue
-            mode = _parse_fire_action(action)
+        elif tag in _top_tag_to_type:
+            mode = _parse_fire_action(child)
             if mode:
-                mode["fireType"] = ft_name
+                mode["fireType"] = _top_tag_to_type[tag]
                 firing_modes.append(mode)
+
+        elif tag == "SWeaponActionFireBeamParams":
+            mode = _parse_beam_action(child)
+            if mode:
+                firing_modes.append(mode)
+
+        elif tag == "SWeaponActionFireTractorBeamParams":
+            mode = {
+                "name": child.get("name", ""),
+                "localisedName": child.get("localisedName", ""),
+                "fireType": "tractor",
+                "minForce": safe_float(child.get("minForce")),
+                "maxForce": safe_float(child.get("maxForce")),
+                "minDistance": safe_float(child.get("minDistance")),
+                "maxDistance": safe_float(child.get("maxDistance")),
+                "fullStrengthDistance": safe_float(child.get("fullStrengthDistance")),
+                "maxAngle": safe_float(child.get("maxAngle")),
+                "maxVolume": safe_float(child.get("maxVolume")),
+            }
+            towing = child.find(".//SWeaponActionFireTractorBeamTowingParams")
+            if towing is not None:
+                mode["towing"] = {
+                    "towingForce": safe_float(towing.get("towingForce")),
+                    "towingMaxAcceleration": safe_float(towing.get("towingMaxAcceleration")),
+                    "towingMaxDistance": safe_float(towing.get("towingMaxDistance")),
+                    "quantumTowMassLimit": safe_float(towing.get("quantumTowMassLimit")),
+                }
+            firing_modes.append(mode)
 
     if firing_modes:
         result["firingModes"] = firing_modes
 
     return result
+
+
+def _parse_dynamic_inner(elem):
+    """Parse a fire action nested inside an SWeaponActionDynamicConditionParams
+    wrapper (defaultWeaponAction / weaponAction inside conditionalWeaponActions).
+    Returns a mode dict tagged with fireType, or None."""
+    tag = elem.tag
+    if tag == "SWeaponActionFireRapidParams":
+        m = _parse_fire_action(elem)
+        if m:
+            m["fireType"] = "rapid"
+        return m
+    if tag == "SWeaponActionFireSingleParams":
+        m = _parse_fire_action(elem)
+        if m:
+            m["fireType"] = "single"
+        return m
+    if tag == "SWeaponActionFireBurstParams":
+        m = _parse_fire_action(elem)
+        if m:
+            m["fireType"] = "burst"
+        return m
+    if tag == "SWeaponActionFireBeamParams":
+        return _parse_beam_action(elem)
+    if tag == "SWeaponActionSequenceParams":
+        # Take first inner fire action as the sequence mode
+        for inner_tag in ("SWeaponActionFireSingleParams", "SWeaponActionFireRapidParams",
+                          "SWeaponActionFireBurstParams"):
+            inner = next(elem.iter(inner_tag), None)
+            if inner is not None:
+                m = _parse_fire_action(inner)
+                if m:
+                    m["fireType"] = "sequence"
+                    seq_entries = []
+                    for entry in elem.iter("SWeaponSequenceEntryParams"):
+                        seq_entries.append({
+                            "delay": safe_float(entry.get("delay")),
+                            "unit": entry.get("unit", ""),
+                            "repetitions": safe_int(entry.get("repetitions", "1")),
+                        })
+                    if seq_entries:
+                        m["sequenceEntries"] = seq_entries
+                return m
+    return None
+
+
+def _parse_beam_action(action):
+    """Parse SWeaponActionFireBeamParams (mining lasers, weapon beams)."""
+    mode = {
+        "name": action.get("name", ""),
+        "localisedName": action.get("localisedName", ""),
+        "fireType": "beam",
+    }
+    # The "Mode" identifier comes from mannequinTag.tag
+    mq = action.find("mannequinTag")
+    if mq is not None:
+        mode["mode"] = mq.get("tag", "")
+
+    # Spread params (for FPS beam weapons inside dynamic-condition wrappers)
+    sp = action.find(".//spreadParams/SSpreadParams")
+    if sp is not None:
+        mode["spread"] = {
+            "min": safe_float(sp.get("min")),
+            "max": safe_float(sp.get("max")),
+            "firstAttack": safe_float(sp.get("firstAttack")),
+            "attack": safe_float(sp.get("attack")),
+            "decay": safe_float(sp.get("decay")),
+        }
+
+    # Beam-specific attributes
+    mode["hitType"] = action.get("hitType", "")
+    mode["hitRadius"] = safe_float(action.get("hitRadius"))
+    mode["minEnergyDraw"] = safe_float(action.get("minEnergyDraw"))
+    mode["maxEnergyDraw"] = safe_float(action.get("maxEnergyDraw"))
+    mode["fullDamageRange"] = safe_float(action.get("fullDamageRange"))
+    mode["zeroDamageRange"] = safe_float(action.get("zeroDamageRange"))
+    mode["heatPerSecond"] = safe_float(action.get("heatPerSecond"))
+    mode["wearPerSecond"] = safe_float(action.get("wearPerSecond"))
+    mode["chargeUpTime"] = safe_float(action.get("chargeUpTime"))
+    mode["chargeDownTime"] = safe_float(action.get("chargeDownTime"))
+
+    # Damage (per second, with full type breakdown)
+    dps = action.find("damagePerSecond")
+    if dps is not None:
+        dinfo = dps.find("DamageInfo")
+        if dinfo is not None:
+            dmg = {}
+            for attr in ["DamagePhysical", "DamageEnergy", "DamageDistortion",
+                         "DamageThermal", "DamageBiochemical", "DamageStun"]:
+                val = safe_float(dinfo.get(attr))
+                if val:
+                    dmg[attr.replace("Damage", "")] = val
+            mode["damagePerSecondBreakdown"] = dmg
+            # Backwards-compat fields used by mining laser builder
+            mode["damageEnergy"] = safe_float(dinfo.get("DamageEnergy"))
+            mode["damagePhysical"] = safe_float(dinfo.get("DamagePhysical"))
+
+    return mode
 
 
 def _parse_fire_action(action):
@@ -701,6 +928,12 @@ def _parse_fire_action(action):
     burst_count = action.get("shotCount")
     if burst_count is not None:
         mode["shotCount"] = safe_int(burst_count)
+
+    # Burst cooldown (post-burst recovery) for burst/single fire actions inside
+    # sequences — contributes to effective RPM.
+    cd = action.get("cooldownTime")
+    if cd is not None:
+        mode["innerCooldownTime"] = safe_float(cd)
 
     # Spin-up/down for rapid fire (gatling) weapons
     spin_up = action.get("spinUpTime")
@@ -820,6 +1053,10 @@ def _parse_quantum_drive_params(comp):
             "State2AccelerationRate": safe_float(std_jump.get("stageTwoAccelRate")),
             "SpoolUpTime": safe_float(std_jump.get("spoolUpTime")),
         }
+        # InterdictionEffectTime is stored on the params child, not the parent
+        iet = std_jump.get("interdictionEffectTime")
+        if iet is not None:
+            result["InterdictionEffectTime"] = safe_float(iet)
 
     # Spline jump params
     spline_jump = comp.find("splineJumpParams")
@@ -847,21 +1084,53 @@ def _parse_quantum_drive_params(comp):
 
 def _parse_missile_params(comp):
     result = {
-        "trackingSignalType": comp.get("trackingSignalType", ""),
-        "lockTime": safe_float(comp.get("lockTime")),
-        "lockRangeMax": safe_float(comp.get("lockRangeMax")),
-        "lockRangeMin": safe_float(comp.get("lockRangeMin")),
-        "lockAngle": safe_float(comp.get("lockAngle")),
+        "maxLifetime": safe_float(comp.get("maxLifetime")),
+        "armTime": safe_float(comp.get("armTime")),
+        "igniteTime": safe_float(comp.get("igniteTime")),
+        "explosionSafetyDistance": safe_float(comp.get("explosionSafetyDistance")),
+        "projectileProximity": safe_float(comp.get("projectileProximity")),
     }
 
+    # Explosion params
     explosion = comp.find("explosionParams")
     if explosion is not None:
-        result["explosionDamage"] = safe_float(explosion.get("damage"))
-        result["explosionRadius"] = safe_float(explosion.get("radius"))
+        result["explosionMinRadius"] = safe_float(explosion.get("minRadius"))
+        result["explosionMaxRadius"] = safe_float(explosion.get("maxRadius"))
+        # Damage from nested DamageInfo
+        damage = explosion.find("damage")
+        if damage is not None:
+            dinfo = damage.find("DamageInfo")
+            if dinfo is not None:
+                dmg = {}
+                for attr in ["DamagePhysical", "DamageEnergy", "DamageDistortion",
+                             "DamageThermal", "DamageBiochemical", "DamageStun"]:
+                    val = safe_float(dinfo.get(attr))
+                    if val:
+                        key = attr.replace("Damage", "")
+                        dmg[key] = val
+                if dmg:
+                    result["explosionDamage"] = dmg
 
-    gcs = comp.find("GCS")
+    # Guidance and control params
+    gcs = comp.find("GCSParams")
     if gcs is not None:
-        result["maxSpeed"] = safe_float(gcs.get("maxSpeed"))
+        result["linearSpeed"] = safe_float(gcs.get("linearSpeed"))
+        result["fuelTankSize"] = safe_float(gcs.get("fuelTankSize"))
+        result["boostPhaseDuration"] = safe_float(gcs.get("boostPhaseDuration"))
+        result["terminalPhaseEngagementTime"] = safe_float(gcs.get("terminalPhaseEngagementTime"))
+        result["terminalPhaseEngagementAngle"] = safe_float(gcs.get("terminalPhaseEngagementAngle"))
+
+    # Targeting params
+    targeting = comp.find("targetingParams")
+    if targeting is not None:
+        result["trackingSignalType"] = targeting.get("trackingSignalType", "")
+        result["trackingSignalMin"] = safe_float(targeting.get("trackingSignalMin"))
+        result["minRatioForLock"] = safe_float(targeting.get("minRatioForLock"))
+        result["lockIncreaseRate"] = safe_float(targeting.get("lockIncreaseRate"))
+        result["lockTime"] = safe_float(targeting.get("lockTime"))
+        result["lockingAngle"] = safe_float(targeting.get("lockingAngle"))
+        result["lockRangeMin"] = safe_float(targeting.get("lockRangeMin"))
+        result["lockRangeMax"] = safe_float(targeting.get("lockRangeMax"))
 
     return result
 
@@ -1001,9 +1270,14 @@ def _parse_item_port(elem):
                 has_subtypes = False
                 for enum_elem in sub_types_elem:
                     st = enum_elem.get("value", "")
-                    if st and st != "UNDEFINED":
-                        types.append(f"{t}.{st}")
-                        has_subtypes = True
+                    if not st:
+                        continue
+                    # Preserve "UNDEFINED" subtype for Bomb (ref emits "Bomb.UNDEFINED");
+                    # for other types, UNDEFINED is a no-op we drop.
+                    if st == "UNDEFINED" and t != "Bomb":
+                        continue
+                    types.append(f"{t}.{st}")
+                    has_subtypes = True
                 if not has_subtypes:
                     types.append(t)
             else:

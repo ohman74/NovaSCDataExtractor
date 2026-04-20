@@ -7,6 +7,9 @@ tools/
 # Generated output JSON
 output/
 
+# Reference data (local comparison only)
+temp/
+
 # Python cache
 __pycache__/
 *.pyc

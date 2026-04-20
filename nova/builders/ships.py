@@ -185,10 +185,22 @@ def _build_ship(class_name, record, ctx):
     mfr_guid = vehicle.get("manufacturerGuid", "") or attach_def.get("manufacturerGuid", "")
     mfr = ctx.get_manufacturer(mfr_guid)
 
+    from .stditem import _clean_description
+    import re as _re
+
+    # Ship descriptions sometimes use "\n \n" (newline-space-newline) as a
+    # separator between metadata and body instead of "\n\n". Normalize before
+    # the metadata-stripping step in _clean_description.
+    raw_desc = ctx.resolve_name(vehicle.get("vehicleDescription", ""))
+    if "\\n" in raw_desc:
+        raw_desc_tmp = raw_desc.replace("\\n", "\n")
+        raw_desc_tmp = _re.sub(r"\n[ \t]+\n", "\n\n", raw_desc_tmp)
+        raw_desc = raw_desc_tmp.replace("\n", "\\n")
+
     ship = {
         "ClassName": class_name,
         "Name": ctx.resolve_name(vehicle.get("vehicleName", class_name)),
-        "Description": ctx.resolve_name(vehicle.get("vehicleDescription", "")),
+        "Description": _clean_description(raw_desc),
         "Manufacturer": mfr.get("Name", "") if mfr else "",
         "Career": ctx.resolve_name(vehicle.get("vehicleCareer", "")),
         "Role": ctx.resolve_name(vehicle.get("vehicleRole", "")),
@@ -228,6 +240,10 @@ def _build_ship(class_name, record, ctx):
     if impl and impl.get("mass"):
         ship["Mass"] = impl["mass"]
 
+    # PortTags from vehicle impl's itemPortTags attribute (ref convention for entry_2)
+    if impl and impl.get("itemPortTags"):
+        ship["PortTags"] = impl["itemPortTags"].split()
+
     # Compute component mass from loadout
     if default_loadout:
         _, component_mass = _compute_mass(default_loadout, ctx)
@@ -239,8 +255,8 @@ def _build_ship(class_name, record, ctx):
     if armor:
         ship["Armor"] = armor
 
-    # Hull structure HP from vehicle impl
-    hull = _build_hull_stats(default_loadout, ctx, impl)
+    # Hull structure HP from vehicle impl + vehicle record penetration
+    hull = _build_hull_stats(default_loadout, ctx, impl, record)
     if hull:
         ship["Hull"] = hull
 
@@ -273,7 +289,8 @@ def _build_ship(class_name, record, ctx):
     if default_loadout:
         impl_ports = impl.get("ports", []) if impl else []
         ship["Hardpoints"] = _build_hardpoints(default_loadout, ctx, impl_ports,
-                                                ship.pop("_storage", []))
+                                                ship.pop("_storage", []),
+                                                class_name=class_name)
 
     # BaseLoadout summary (computed from hardpoints)
     base_loadout = _build_base_loadout_summary(ship.get("Hardpoints", {}), ctx)
@@ -430,9 +447,6 @@ def _build_cargo(loadout_entries, ctx):
 
     _walk(loadout_entries)
 
-    if not cargo_grid_scu and not storage_scu:
-        return None
-
     return {
         "CargoGrid": round(cargo_grid_scu, 2),
         "CargoContainers": 0.0,
@@ -440,21 +454,86 @@ def _build_cargo(loadout_entries, ctx):
     }
 
 
-def _build_hull_stats(loadout_entries, ctx, impl):
-    """Build Hull stats from vehicle impl XML (structural part HP)."""
+def _build_hull_stats(loadout_entries, ctx, impl, record=None):
+    """Build Hull stats from vehicle impl XML (structural part HP).
+
+    Adds PenetrationDamageMultiplier from VehicleComponentParams and
+    ThrustersHealthPoints + DoorsHealthPoints from loadout items.
+    """
     if not impl:
         return None
     hull_hp = impl.get("hullHP")
-    if not hull_hp:
-        return None
 
-    result = {"StructureHealthPoints": {}}
-    if hull_hp.get("VitalParts"):
-        result["StructureHealthPoints"]["VitalParts"] = hull_hp["VitalParts"]
-    if hull_hp.get("Parts"):
-        result["StructureHealthPoints"]["Parts"] = hull_hp["Parts"]
+    result = {}
 
-    return result if result["StructureHealthPoints"] else None
+    # PenetrationDamageMultiplier from the vehicle record
+    if record:
+        vp = record.get("vehicle", {})
+        fuse = vp.get("fusePenetrationDamageMultiplier")
+        comp = vp.get("componentPenetrationDamageMultiplier")
+        if fuse is not None or comp is not None:
+            result["PenetrationDamageMultiplier"] = {
+                "Fuse": float(fuse if fuse is not None else 1.0),
+                "Component": float(comp if comp is not None else 1.0),
+            }
+
+    if hull_hp:
+        shp = {}
+        if hull_hp.get("VitalParts"):
+            shp["VitalParts"] = hull_hp["VitalParts"]
+        if hull_hp.get("Parts"):
+            shp["Parts"] = hull_hp["Parts"]
+        if shp:
+            result["StructureHealthPoints"] = shp
+
+    # ThrustersHealthPoints + DoorsHealthPoints from loadout
+    thrusters_hp = {"Main": {}, "Retro": {}, "Maneuvering": {}}
+    doors_hp = {}
+
+    def _walk(entries):
+        for e in entries:
+            pn = e.get("portName", "")
+            pn_lower = pn.lower()
+            cn = e.get("entityClassName", "")
+            if cn:
+                item = ctx.get_item(cn)
+                if item:
+                    health = item.get("components", {}).get("health", {})
+                    hp = health.get("health") if isinstance(health, dict) else None
+                    if hp:
+                        # Strip hardpoint_ prefix for the key
+                        key = pn[len("hardpoint_"):] if pn_lower.startswith("hardpoint_") else pn
+                        # Classify thruster port: Main/Retro/Maneuvering/VTOL (or Door)
+                        # Use the installed item's type (SCItemThrusterParams.thrusterType)
+                        # when available; fall back to port name heuristics.
+                        thruster_params = item.get("components", {}).get("SCItemThrusterParams", {})
+                        thruster_type = ""
+                        if isinstance(thruster_params, dict):
+                            thruster_type = (thruster_params.get("thrusterType", "") or "").lower()
+
+                        if thruster_type == "main" or ("engine" in pn_lower and "thruster" not in pn_lower):
+                            thrusters_hp["Main"][key] = float(hp)
+                        elif thruster_type == "retro" or "retro" in pn_lower:
+                            thrusters_hp["Retro"][key] = float(hp)
+                        elif thruster_type == "vtol" or "vtol" in pn_lower:
+                            thrusters_hp.setdefault("VTOL", {})[key] = float(hp)
+                        elif thruster_type == "maneuver" or ("thruster" in pn_lower and "vtol" not in pn_lower):
+                            thrusters_hp["Maneuvering"][key] = float(hp)
+                        elif pn_lower.startswith("hardpoint_door") or pn_lower.startswith("door_"):
+                            doors_hp[key] = float(hp)
+            for c in e.get("children", []):
+                _walk([c])
+
+    _walk(loadout_entries)
+
+    # Remove empty sub-dicts
+    thrusters_hp = {k: v for k, v in thrusters_hp.items() if v}
+    if thrusters_hp:
+        result["ThrustersHealthPoints"] = thrusters_hp
+    if doors_hp:
+        result["DoorsHealthPoints"] = doors_hp
+
+    return result if result else None
 
 
 def _build_flight_characteristics(loadout_entries, ctx):
@@ -500,10 +579,14 @@ def _build_flight_characteristics(loadout_entries, ctx):
                         if tt == "VTOL":
                             has_vtol = True
 
-                # Quantum drive — spool time
+                # Quantum drive — spool time comes from StandardJump.SpoolUpTime
                 if ("quantum_drive" in pn or "quantumdrive" in pn) and "quantumDrive" in comps:
                     qd = comps["quantumDrive"]
-                    qd_spool = safe_float(qd.get("spoolUpTime", 0))
+                    sj = qd.get("StandardJump", {}) if isinstance(qd, dict) else {}
+                    if isinstance(sj, dict) and sj.get("SpoolUpTime") is not None:
+                        qd_spool = safe_float(sj.get("SpoolUpTime"))
+                    else:
+                        qd_spool = safe_float(qd.get("spoolUpTime", 0))
 
             # Recurse into children
             children = entry.get("children", [])
@@ -545,14 +628,12 @@ def _build_flight_characteristics(loadout_entries, ctx):
 
     # AccelerationG — computed from thrust / mass (not available here, skip for now)
 
-    # MasterModes
+    # MasterModes — BaseSpoolTime defaults to 1.0 (SPViewer convention).
     ifcs_core = ifcs.get("ifcsCoreParams", {})
-    base_spool = safe_float(ifcs_core.get("spoolUpTime", 0))
     boost_fwd = safe_float(ifcs.get("boostSpeedForward", 0))
     boost_bwd = safe_float(ifcs.get("boostSpeedBackward", 0))
     master_modes = {}
-    if base_spool:
-        master_modes["BaseSpoolTime"] = base_spool
+    master_modes["BaseSpoolTime"] = 1.0
     if qd_spool:
         master_modes["QuantumDriveSpoolTime"] = qd_spool
     scm_mode = {}
@@ -924,11 +1005,11 @@ def _classify_port(port_name, item_type=""):
         return "BombRacks"
     if "cm_launcher" in pn or "countermeasure" in pn:
         return "Countermeasures"
-    if "mining" in pn:
+    if "mining" in pn and "controller" not in pn:
         return "MiningHardpoints"
-    if "salvage" in pn:
+    if "salvage" in pn and "controller" not in pn:
         return "SalvageHardpoints"
-    if "interdiction" in pn or "quantum_enforcement" in pn or "interdiction_device" in pn:
+    if ("interdiction" in pn or "quantum_enforcement" in pn or "interdiction_device" in pn) and "controller" not in pn:
         return "InterdictionHardpoints"
     if "utility" in pn:
         return "UtilityHardpoints"
@@ -952,8 +1033,9 @@ def _classify_port(port_name, item_type=""):
         return "HydrogenFuelTanks"
 
     # Components - Systems
+    # Shield controllers: not emitted at Hardpoints level (ref convention)
     if "controller_shield" in pn:
-        return "ShieldControllers"
+        return None
     if "controller_flight" in pn or "flight_blade" in pn:
         return "FlightBlade"
     if ("shield" in pn) and "controller" not in pn:
@@ -1018,7 +1100,7 @@ def _empty_category():
     return {"InstalledItems": [], "Hardpoints": 0}
 
 
-def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=None):
+def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=None, class_name=""):
     """Build the structured Hardpoints tree matching the reference format."""
     # Build port lookup from vehicle impl for minSize/maxSize/types
     port_defs = {}
@@ -1061,8 +1143,8 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
                 "Countermeasures": {"InstalledItems": [], "ItemsQuantity": 0},
             },
             "Avionics": {
-                "FlightBlade": {"InstalledItems": []},
-                "Radars": _empty_category(),
+                "FlightBlade": {"InstalledItems": [], "Hardpoints": 0},
+                "Radars": {"InstalledItems": [], "ItemsQuantity": 0},
                 "SelfDestruct": {"InstalledItems": [], "ItemsQuantity": 0},
             },
             "Modules": _empty_category(),
@@ -1168,12 +1250,83 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
     _enrich_radar_detection(tree, ctx)
 
     # Shield FaceType + MaxItem
-    _enrich_shield_info(tree, loadout_entries, ctx)
+    _enrich_shield_info(tree, loadout_entries, ctx, class_name)
+
+    # Enrich Controllers sub-blocks (Missiles, Weapons, Wheeled)
+    _enrich_controllers(tree, loadout_entries, ctx, class_name)
+
+    # TotalFuelIntakeRate on FuelIntakes block
+    fi_block = tree.get("Components", {}).get("Systems", {}).get("FuelIntakes", {})
+    if isinstance(fi_block, dict):
+        total = sum(float(it.get("FuelIntakeRate", 0) or 0) for it in fi_block.get("InstalledItems", []))
+        fi_block["TotalFuelIntakeRate"] = total
+
+    # TotalFuelCapacity / TotalQuantumFuelCapacity on fuel tank blocks
+    propulsion = tree.get("Components", {}).get("Propulsion", {})
+    for key, total_field in (("HydrogenFuelTanks", "TotalFuelCapacity"),
+                              ("QuantumFuelTanks", "TotalQuantumFuelCapacity")):
+        block = propulsion.get(key, {})
+        if isinstance(block, dict):
+            total = sum(float(it.get("Capacity", 0) or 0) for it in block.get("InstalledItems", []))
+            block[total_field] = total
 
     # Update counts
     _update_counts(tree)
 
+    # Collapse empty weapon categories to {} to match ref
+    _collapse_empty_categories(tree)
+
     return tree
+
+
+def _enrich_controllers(tree, loadout_entries, ctx, class_name):
+    """Populate Controllers sub-blocks from loadout items.
+
+    - Missiles: {MaxArmed, Cooldown} from SCItemMissileControllerParams
+    - Weapons: {PoolSize} from vehicle's FixedPowerPool for WeaponGun (weapon_pool_sizes)
+    - Wheeled: always present (empty {} for ships, populated for ground vehicles)
+    """
+    controllers = tree.get("Components", {}).get("Systems", {}).get("Controllers", {})
+
+    # Strip any InstalledItems that snuck in (ref doesn't have a top-level
+    # InstalledItems in Controllers — everything sits under named sub-keys).
+    if "InstalledItems" in controllers:
+        del controllers["InstalledItems"]
+
+    # Missiles: walk loadout for controller_missile port
+    missile_data = {}
+
+    def _walk(entries):
+        for e in entries:
+            pn = e.get("portName", "").lower()
+            if "controller_missile" in pn:
+                cn = e.get("entityClassName", "")
+                if cn:
+                    item = ctx.get_item(cn)
+                    if item:
+                        mc = item.get("components", {}).get("SCItemMissileControllerParams", {})
+                        if isinstance(mc, dict):
+                            ma = mc.get("maxArmedMissiles")
+                            lc = mc.get("launchCooldownTime")
+                            if ma is not None:
+                                missile_data["MaxArmed"] = float(ma)
+                            if lc is not None:
+                                missile_data["Cooldown"] = float(lc)
+            for c in e.get("children", []):
+                _walk([c])
+
+    _walk(loadout_entries)
+    if missile_data:
+        controllers["Missiles"] = missile_data
+
+    # Weapons: from weapon_pool_sizes (WeaponGun pool)
+    pool = ctx.weapon_pool_sizes.get(class_name.lower())
+    if pool:
+        controllers["Weapons"] = {"PoolSize": float(pool)}
+
+    # Wheeled: always emit (empty {} for ships)
+    if "Wheeled" not in controllers:
+        controllers["Wheeled"] = {}
 
 
 def _enrich_radar_detection(tree, ctx):
@@ -1245,7 +1398,7 @@ def _enrich_radar_detection(tree, ctx):
         radars_node["DetectionCapability"] = detection
 
 
-def _enrich_shield_info(tree, loadout_entries, ctx):
+def _enrich_shield_info(tree, loadout_entries, ctx, class_name=""):
     """Add FaceType and MaxItem to the Shields node."""
     shields_node = tree.get("Components", {}).get("Systems", {}).get("Shields", {})
     installed = shields_node.get("InstalledItems", [])
@@ -1271,6 +1424,11 @@ def _enrich_shield_info(tree, loadout_entries, ctx):
     face_type = _find_shield_controller(loadout_entries)
     if face_type:
         shields_node["FaceType"] = face_type
+
+    # MaxItem from shield DynamicPowerPool maxItemCount
+    max_item = ctx.shield_pool_sizes.get(class_name.lower())
+    if max_item is not None and max_item > 0:
+        shields_node["MaxItem"] = float(max_item)
 
 
 def _compute_storage(loadout_entries, ctx):
@@ -1398,14 +1556,26 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
         else:
             entry["MinSize"] = size
             entry["MaxSize"] = size
+        # Loadout uses the entity's GUID (ref convention for ship hardpoints),
+        # not the className. Fall back to className if GUID unavailable.
         entry["Loadout"] = entity_class
+        # BaseLoadout.Class: look up via manufacturer class map (matches stditem.py)
+        from .stditem import MANUFACTURER_CLASS, _COMPONENT_TYPES_CLASSED
+        base_type = full_type.split(".")[0] if full_type else ""
+        mfr_code = (mfr or {}).get("Code", "") if mfr else ""
+        bl_class = ""
+        if base_type in _COMPONENT_TYPES_CLASSED and mfr_code:
+            if full_type == "LifeSupportGenerator.UNDEFINED":
+                bl_class = "" if entity_class.startswith("LFSP_S04_") else "Civilian"
+            else:
+                bl_class = MANUFACTURER_CLASS.get(mfr_code, "")
         entry["BaseLoadout"] = {
             "ClassName": entity_class,
             "Name": ctx.resolve_name(ad.get("name", "")),
             "Type": full_type,
             "Size": size,
             "Grade": ad.get("grade", 0),
-            "Class": "",
+            "Class": bl_class,
         }
         # Types: from port definition (vehicle impl) if available, otherwise
         # build from item type + child port types for comprehensive listing
@@ -1565,16 +1735,33 @@ def _build_cm_entry(port_name, entity_class, item_record, ctx):
 
 def _build_simple_entry(port_name, entity_class, item_record, ctx):
     """Build a simple entry for fuel tanks, intakes, etc."""
-    entry = {
-        "Name": port_name,
-        "Uneditable": True,
-    }
+    entry = {"Name": port_name}
 
     if item_record:
         ad = item_record.get("attachDef", {})
         entry["Size"] = ad.get("size", 0)
+        # Mass from physics (always emit, even if 0 — fuel tanks often have 0)
+        physics = item_record.get("components", {}).get("physics", {})
+        entry["Mass"] = float(physics.get("mass", 0) or 0)
         entry["Grade"] = ad.get("grade", 0)
+        # FuelIntake rate from SCItemFuelIntakeParams.fuelPushRate
+        fi = item_record.get("components", {}).get("SCItemFuelIntakeParams", {})
+        if isinstance(fi, dict):
+            rate = fi.get("fuelPushRate")
+            if rate is not None:
+                entry["FuelIntakeRate"] = float(rate)
+        # Capacity from ResourceContainer.capacity.SStandardCargoUnit.standardCargoUnits
+        rc = item_record.get("components", {}).get("ResourceContainer", {})
+        if isinstance(rc, dict):
+            cap = rc.get("capacity", {})
+            if isinstance(cap, dict):
+                std = cap.get("SStandardCargoUnit", {})
+                if isinstance(std, dict):
+                    units = std.get("standardCargoUnits")
+                    if units is not None:
+                        entry["Capacity"] = float(units)
 
+    entry["Uneditable"] = True
     return entry
 
 
@@ -1597,10 +1784,10 @@ def _build_storage_entry(port_name, entity_class, item_record, ctx):
 
 
 def _full_type(attach_def):
-    """Build full type string."""
+    """Build full type string, preserving .UNDEFINED suffix to match ref."""
     t = attach_def.get("type", "")
     st = attach_def.get("subType", "")
-    if t and st and st != "UNDEFINED":
+    if t and st:
         return f"{t}.{st}"
     return t
 
@@ -1656,11 +1843,41 @@ def _place(tree, category, entry):
     if not path:
         return
 
+    # Categories that ref sub-categorizes in a further nested dict:
+    # - InterdictionHardpoints → EMP / QED (by item Type)
+    # - MiningHardpoints → PilotControlled / CrewControlled (by item Type)
+    # - SalvageHardpoints → PilotControlled / CrewControlled (by item Type)
+    sub_key = None
+    if category == "InterdictionHardpoints":
+        item_type = (entry.get("BaseLoadout", {}).get("Type", "") or "").split(".")[0]
+        if item_type.startswith("EMP"):
+            sub_key = "EMP"
+        elif "QuantumInterdictionGenerator" in item_type or "QED" in item_type:
+            sub_key = "QED"
+    elif category in ("MiningHardpoints", "SalvageHardpoints"):
+        item_type = entry.get("BaseLoadout", {}).get("Type", "") or ""
+        # ToolArm.* → PilotControlled (pilot operates from cockpit)
+        # UtilityTurret.MannedTurret / Turret.Utility → CrewControlled
+        if item_type.startswith("ToolArm"):
+            sub_key = "PilotControlled"
+        elif "MannedTurret" in item_type or item_type.startswith("Turret.Utility"):
+            sub_key = "CrewControlled"
+        else:
+            sub_key = "PilotControlled"  # default fallback
+
     node = tree
     for key in path:
         if key not in node:
-            node[key] = {"InstalledItems": []}
+            node[key] = {}
         node = node[key]
+
+    if sub_key:
+        if sub_key not in node:
+            # Initialize using the category's count-key convention
+            count_key = "ItemsQuantity" if (category == "SalvageHardpoints"
+                                             and sub_key in ("Buff", "SalvageBuffer")) else "Hardpoints"
+            node[sub_key] = {"InstalledItems": [], count_key: 0}
+        node = node[sub_key]
 
     if "InstalledItems" in node:
         node["InstalledItems"].append(entry)
@@ -1668,16 +1885,149 @@ def _place(tree, category, entry):
         node.setdefault("InstalledItems", []).append(entry)
 
 
-def _update_counts(tree):
+def _count_hardpoints(items):
+    """Count hardpoints recursively: top-level items + all nested Ports.
+
+    Matches ref convention where e.g. PilotWeapons.Hardpoints counts both
+    the turret mounts AND the weapon slots inside them.
+    """
+    total = len(items)
+    for it in items:
+        if isinstance(it, dict):
+            total += _count_hardpoints(it.get("Ports", []))
+    return total
+
+
+# Categories whose Hardpoints/ItemsQuantity count includes nested Ports
+# (e.g. PilotWeapons Hardpoints = mount count + weapon-slot count).
+_WEAPON_CATEGORIES_RECURSIVE_COUNT = {
+    "PilotWeapons", "MannedTurrets", "RemoteTurrets", "PDCTurrets",
+    "MissileRacks", "BombRacks", "UtilityHardpoints", "UtilityTurrets",
+}
+
+
+def _update_counts(tree, parent_key=""):
     """Recursively update Hardpoints/ItemsQuantity counts."""
     if not isinstance(tree, dict):
         return
     for key, val in tree.items():
         if isinstance(val, dict):
-            _update_counts(val)
+            _update_counts(val, key)
             if "InstalledItems" in val:
-                count = len(val["InstalledItems"])
+                items = val["InstalledItems"]
+                if key in _WEAPON_CATEGORIES_RECURSIVE_COUNT:
+                    count = _count_hardpoints(items)
+                else:
+                    count = len(items)
                 if "Hardpoints" in val:
                     val["Hardpoints"] = count
                 elif "ItemsQuantity" in val:
                     val["ItemsQuantity"] = count
+
+
+# Weapon categories under Hardpoints.Weapons that collapse to {} when empty
+# (ref convention — if no items installed AND no slot count, emit empty dict).
+_WEAPON_CATEGORIES_COLLAPSE_EMPTY = (
+    "PilotWeapons", "MannedTurrets", "RemoteTurrets", "PDCTurrets",
+    "MissileRacks", "BombRacks", "UtilityHardpoints", "UtilityTurrets",
+    "InterdictionHardpoints", "MiningHardpoints", "SalvageHardpoints",
+)
+
+
+def _collapse_empty_categories(tree):
+    """Normalize empty categories to match ref format.
+
+    Converts `{InstalledItems: [], Hardpoints: 0}` → `{}` for categories in
+    `_WEAPON_CATEGORIES_COLLAPSE_EMPTY` and `_COMPONENT_CATEGORIES_COLLAPSE_EMPTY`.
+    Preserves sub-categorized blocks (e.g. InterdictionHardpoints.EMP).
+
+    For Components.WeaponsRacks/Storage: when InstalledItems is empty, strip
+    that key (keep only `{ItemsQuantity: N}`). Matches ref shape.
+    """
+    weapons = tree.get("Weapons", {})
+    for cat in _WEAPON_CATEGORIES_COLLAPSE_EMPTY:
+        block = weapons.get(cat)
+        if not isinstance(block, dict):
+            continue
+        installed = block.get("InstalledItems") or []
+        count = block.get("Hardpoints", 0)
+        has_sub = any(
+            isinstance(v, dict) and (v.get("InstalledItems") or v.get("Hardpoints") or v.get("ItemsQuantity"))
+            for k, v in block.items()
+            if k not in ("InstalledItems", "Hardpoints", "ItemsQuantity")
+        )
+        if not installed and not count and not has_sub:
+            weapons[cat] = {}
+        elif has_sub:
+            if "InstalledItems" in block and not block["InstalledItems"]:
+                del block["InstalledItems"]
+            if "Hardpoints" in block and not block["Hardpoints"]:
+                del block["Hardpoints"]
+
+    # Components: Modules/Paints/Flairs collapse to {} when empty
+    components = tree.get("Components", {})
+    for cat in ("Modules", "Paints", "Flairs"):
+        block = components.get(cat)
+        if not isinstance(block, dict):
+            continue
+        installed = block.get("InstalledItems") or []
+        count = block.get("Hardpoints", 0)
+        if not installed and not count:
+            components[cat] = {}
+
+    # Components: WeaponsRacks/Storage drop empty InstalledItems (keep ItemsQuantity)
+    for cat in ("WeaponsRacks", "Storage"):
+        block = components.get(cat)
+        if not isinstance(block, dict):
+            continue
+        if not (block.get("InstalledItems") or []):
+            if "InstalledItems" in block:
+                del block["InstalledItems"]
+
+    # Components.Propulsion: QuantumDrives collapses to {} when empty;
+    # Thrusters/FuelTanks drop empty InstalledItems (keep ItemsQuantity + totals).
+    propulsion = components.get("Propulsion", {})
+    for cat in ("QuantumDrives",):
+        block = propulsion.get(cat)
+        if isinstance(block, dict) and not (block.get("InstalledItems") or []) and not block.get("Hardpoints", 0):
+            propulsion[cat] = {}
+    thrusters = propulsion.get("Thrusters", {})
+    for cat in ("MainThrusters", "RetroThrusters", "VtolThrusters", "ManeuveringThrusters"):
+        block = thrusters.get(cat)
+        if isinstance(block, dict) and not (block.get("InstalledItems") or []):
+            if "InstalledItems" in block:
+                del block["InstalledItems"]
+    for cat in ("HydrogenFuelTanks", "QuantumFuelTanks"):
+        block = propulsion.get(cat)
+        if isinstance(block, dict) and not (block.get("InstalledItems") or []):
+            if "InstalledItems" in block:
+                del block["InstalledItems"]
+
+    # Components.Systems: collapse empty LifeSupport/Countermeasures/FuelIntakes/Shields
+    systems = components.get("Systems", {})
+    # LifeSupport collapses to {} when empty
+    ls = systems.get("LifeSupport")
+    if isinstance(ls, dict) and not (ls.get("InstalledItems") or []):
+        systems["LifeSupport"] = {}
+    # Countermeasures/FuelIntakes: drop empty InstalledItems
+    for cat in ("Countermeasures", "FuelIntakes"):
+        block = systems.get(cat)
+        if isinstance(block, dict) and not (block.get("InstalledItems") or []):
+            if "InstalledItems" in block:
+                del block["InstalledItems"]
+
+    # Components.Avionics: FlightBlade collapses to {} when empty;
+    # Radars/SelfDestruct drop empty InstalledItems.
+    avionics = components.get("Avionics", {})
+    fb = avionics.get("FlightBlade")
+    if isinstance(fb, dict) and not (fb.get("InstalledItems") or []) and not fb.get("Hardpoints", 0):
+        avionics["FlightBlade"] = {}
+    for cat in ("Radars", "SelfDestruct"):
+        block = avionics.get(cat)
+        if isinstance(block, dict) and not (block.get("InstalledItems") or []):
+            if "InstalledItems" in block:
+                del block["InstalledItems"]
+
+    # Remove Components.Armor (ref doesn't have this key)
+    if "Armor" in components:
+        del components["Armor"]

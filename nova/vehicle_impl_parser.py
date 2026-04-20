@@ -237,32 +237,44 @@ def _parse_item_port(part_elem):
 def get_vehicle_impl_data(vehicle_impls, vehicle_definition, class_name):
     """Look up vehicle implementation data by vehicleDefinition path or className.
 
+    Lookup is case-insensitive because vehicleDefinition paths from the game
+    data are lowercase while impl filenames use proper casing (AEGS_Gladius).
+
     Args:
         vehicle_impls: dict from parse_vehicle_implementations
-        vehicle_definition: path like "Scripts/Entities/Vehicles/Implementations/Xml/AEGS_Gladius.xml"
+        vehicle_definition: path like "scripts/.../xml/aegs_gladius.xml" (lowercase)
         class_name: fallback className like "AEGS_Gladius"
 
     Returns:
         parsed vehicle impl data dict, or None
     """
+    # Build a case-insensitive index once (cached on the dict)
+    idx = vehicle_impls.get("__lower_index__")
+    if idx is None:
+        idx = {k.lower(): k for k in vehicle_impls.keys() if not k.startswith("__")}
+        vehicle_impls["__lower_index__"] = idx
+
+    def _get(key):
+        orig = idx.get(key.lower())
+        return vehicle_impls.get(orig) if orig else None
+
     # Try by vehicleDefinition filename
     if vehicle_definition:
         basename = os.path.splitext(os.path.basename(vehicle_definition))[0]
-        data = vehicle_impls.get(basename)
+        data = _get(basename)
         if data:
             return data
 
-    # Try by className (strip variant suffixes)
-    for name in [class_name]:
-        data = vehicle_impls.get(name)
-        if data:
-            return data
+    # Try by className exact match (case-insensitive)
+    data = _get(class_name)
+    if data:
+        return data
 
     # Try matching by removing common suffixes
     base = class_name.split("_")
     for i in range(len(base), 1, -1):
         candidate = "_".join(base[:i])
-        data = vehicle_impls.get(candidate)
+        data = _get(candidate)
         if data:
             return data
 

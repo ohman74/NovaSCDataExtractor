@@ -4,7 +4,12 @@ from .stditem import build_std_item
 
 
 def _is_non_equippable(class_name):
-    """Filter out items that can't be equipped on player ships/vehicles."""
+    """Filter out items that can't be equipped on player ships/vehicles.
+
+    Note: kept narrower than "truly non-equippable" because SPViewer's reference
+    includes some items that are technically static-scene or special (RADR_*_Fake,
+    Colonialism_Outpost_*, Orbital_Sentry_*, GATS_*_fps_balance).
+    """
     cn = class_name.lower()
 
     # Templates
@@ -15,12 +20,12 @@ def _is_non_equippable(class_name):
     if cn.startswith("test_") or "_test_" in cn or cn.startswith("master_"):
         return True
 
-    # Low-poly / hologram / fake / dummy
-    if "lowpoly" in cn or "fakehologram" in cn or "_dummy" in cn or "_fake" in cn:
+    # Low-poly / hologram / dummy (but NOT _fake — SPViewer includes RADR_*_Fake)
+    if "lowpoly" in cn or "fakehologram" in cn or "_dummy" in cn:
         return True
 
-    # NPC-only turrets and defense installations
-    if "colonialism_" in cn or "pudefenseturret" in cn or "orbital_sentry" in cn:
+    # NPC-only PU defense installations (but allow Colonialism_ and Orbital_Sentry_ — in ref)
+    if "pudefenseturret" in cn:
         return True
     if "destructible_pu" in cn or "_ground_destructible" in cn:
         return True
@@ -88,9 +93,15 @@ def build_ship_equipment(ctx):
         if base_type not in _INCLUDED_TYPES:
             continue
 
-        # Skip FPS items (handled by fps_weapons/fps_attachments)
+        # Skip FPS items (handled by fps_weapons/fps_attachments).
+        # Use path only for personal/FPS item types so that ship weapons with
+        # "_fps_balance" suffixes (like GATS_BallisticGatling_Mounted_S1) stay.
         path = record.get("path", "").lower()
-        if "personal" in item_type.lower() or "fps" in path:
+        if "personal" in item_type.lower():
+            continue
+        if "fps" in path and base_type in {"WeaponPersonal", "FPS_Deployable",
+                                             "FPS_Consumable", "FPS_Radar",
+                                             "RemovableChip"}:
             continue
 
         # Skip non-equippable items: templates, test items, NPC-only, low-poly, dummies

@@ -30,8 +30,8 @@ def _is_non_player_fps(class_name, attach_def):
     if cn.startswith("vlk_"):
         return True
 
-    # Multitools, fire extinguishers (utility, not weapons)
-    if "multitool" in cn or "fire_extinguisher" in cn or "salvage_repair" in cn:
+    # salvage_repair attachments are handled by fps_attachments.py, not here
+    if "salvage_repair" in cn:
         return True
 
     # Mines (not available to players)
@@ -62,10 +62,20 @@ def _weapon_signature(std_item):
 
 
 def _find_base_weapon(class_name, all_weapons):
-    """Find the base weapon by progressively stripping name segments."""
+    """Find the base weapon by progressively stripping name segments.
+
+    Handles both suffix-style (base → base_variant) and numbered variants
+    (base_01 → base_02/03/04 by replacing the last numeric suffix with _01).
+    """
     parts = class_name.split("_")
+    # Try progressive suffix stripping first
     for i in range(len(parts) - 1, 1, -1):
         candidate = "_".join(parts[:i])
+        if candidate != class_name and candidate in all_weapons:
+            return candidate
+    # Try replacing the last numeric suffix with _01 (banu_melee_02 → banu_melee_01)
+    if parts and parts[-1].isdigit() and parts[-1] != "01":
+        candidate = "_".join(parts[:-1] + ["01"])
         if candidate != class_name and candidate in all_weapons:
             return candidate
     return None
@@ -119,12 +129,46 @@ def build_fps_weapons(ctx):
     # Second pass: filter skin variants with identical stats
     weapons = []
     for class_name, weapon in all_weapons.items():
+        # Orphan variant check: if className has "_01_<suffix>" pattern (e.g.
+        # sasu_pistol_toy_01_ea_elim), ref drops the variant entirely.
+        parts = class_name.split("_")
+        has_01_then_suffix = False
+        for idx in range(len(parts) - 1):
+            if parts[idx] == "01" and idx < len(parts) - 1:
+                has_01_then_suffix = True
+                break
+        if has_01_then_suffix:
+            continue
+
         base_cn = _find_base_weapon(class_name, all_weapons)
         if base_cn:
             base_sig = _weapon_signature(all_weapons[base_cn]["stdItem"])
             var_sig = _weapon_signature(weapon["stdItem"])
             if base_sig == var_sig:
                 continue  # Skin-only variant, skip
+        else:
+            # No base found in our output. Check if this is an orphan variant:
+            # - className has an "_01" segment followed by extra suffix segments
+            #   (e.g. sasu_pistol_toy_01_ea_elim, grin_multitool_01_default_grapple)
+            # - className ends with a short variant suffix like _cen01, _imp01
+            # - className matches a variant of a base that doesn't exist in ctx.items
+            #   (e.g. rrs_melee_01_fallout01, where rrs_melee_01 itself is absent)
+            parts = class_name.split("_")
+            is_orphan_variant = False
+            # Pattern 1: has _01 at position i<last, followed by extra segments
+            for idx in range(len(parts) - 1):
+                if parts[idx] == "01" and idx < len(parts) - 1:
+                    is_orphan_variant = True
+                    break
+            # Pattern 2: last segment ends with 2-digit-variant like _cen01, _imp01, _01_fallout01
+            if not is_orphan_variant and len(parts) >= 3:
+                last = parts[-1]
+                if (len(last) > 2 and last[-2:].isdigit() and not last.isdigit()):
+                    # e.g. "cen01", "imp01", "fallout01" — variant suffix
+                    is_orphan_variant = True
+
+            if is_orphan_variant:
+                continue
 
         weapons.append(weapon)
 

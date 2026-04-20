@@ -17,7 +17,8 @@ import time
 from . import __version__
 from .config import Config
 from .tool_downloader import ensure_tools
-from .extractor import extract_all_xml_and_dcb, get_entity_files, get_localization_file
+from .extractor import (extract_all_xml_and_dcb, get_entity_files, get_localization_file,
+                          get_vehicle_impl_files, scan_cryxml_binaries)
 from .converter import convert_game_dcb, convert_entities
 from .dataforge_parser import stream_parse_dataforge
 from .entity_parser import parse_entity_file
@@ -36,7 +37,7 @@ class BuildContext:
     def __init__(self, items_by_class, vehicles_by_class, guid_to_class,
                  manufacturers, ammo_params, translations, vehicle_impls=None,
                  inventory_containers=None, gimbal_modifiers=None,
-                 weapon_pool_sizes=None):
+                 weapon_pool_sizes=None, shield_pool_sizes=None):
         self.items = items_by_class
         self.vehicles = vehicles_by_class
         self.guids = guid_to_class
@@ -47,6 +48,7 @@ class BuildContext:
         self.inventory_containers = inventory_containers or {}
         self.gimbal_modifiers = gimbal_modifiers or {}
         self.weapon_pool_sizes = weapon_pool_sizes or {}
+        self.shield_pool_sizes = shield_pool_sizes or {}
 
     def resolve_name(self, raw_name):
         return resolve_name(raw_name, self.translations)
@@ -189,6 +191,16 @@ def main():
         print(f"  Found {len(found)} {entity_type} entity files")
         entity_files.extend(found)
 
+    # Scan cache for CryXML-binary .xml files under known-binary directories
+    # (covers vehicle implementation files + any other newly added binary XMLs).
+    cryxml_files = scan_cryxml_binaries(config)
+    # Exclude ones already in entity_files to avoid double-queueing
+    seen_paths = {os.path.abspath(p) for p in entity_files}
+    for p in cryxml_files:
+        if os.path.abspath(p) not in seen_paths:
+            entity_files.append(p)
+    print(f"  Found {len(cryxml_files)} CryXML-binary .xml files needing conversion")
+
     # Stage 4: Convert entity files (CryXML binary -> readable XML)
     if entity_files:
         entity_xml_map = convert_entities(config, entity_files)
@@ -208,8 +220,10 @@ def main():
     print("\n[PARSE] Parsing entity files...")
     entity_data_map = {}
     weapon_pool_sizes = {}  # className (lower) -> pool size
+    shield_pool_sizes = {}  # className (lower) -> shield maxItemCount
     import re
     _POOL_RE = re.compile(r'FixedPowerPool\s+itemType="WeaponGun"\s+poolSize="(\d+)"')
+    _SHIELD_POOL_RE = re.compile(r'DynamicPowerPool\s+itemType="Shield"\s+maxItemCount="(-?\d+)"')
     for original, xml_file in entity_xml_map.items():
         data = parse_entity_file(xml_file)
         if data:
@@ -218,7 +232,7 @@ def main():
                 class_name = os.path.splitext(os.path.basename(original))[0]
             entity_data_map[class_name] = data
 
-        # Extract weapon pool size from entity XML via regex (fast)
+        # Extract pool sizes from entity XML via regex (fast)
         try:
             with open(xml_file, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
@@ -226,9 +240,15 @@ def main():
             if m:
                 cn = os.path.splitext(os.path.basename(original))[0]
                 weapon_pool_sizes[cn.lower()] = int(m.group(1))
+            m2 = _SHIELD_POOL_RE.search(content)
+            if m2:
+                cn = os.path.splitext(os.path.basename(original))[0]
+                val = int(m2.group(1))
+                if val > 0:  # -1 means unlimited, don't emit
+                    shield_pool_sizes[cn.lower()] = val
         except Exception:
             pass
-    print(f"  Parsed {len(entity_data_map)} entity files, {len(weapon_pool_sizes)} weapon pool sizes")
+    print(f"  Parsed {len(entity_data_map)} entity files, {len(weapon_pool_sizes)} weapon pool sizes, {len(shield_pool_sizes)} shield pool sizes")
 
     print("\n[PARSE] Loading localization...")
     translations = parse_localization(loc_path)
@@ -240,7 +260,8 @@ def main():
     # Build context shared by all builders
     ctx = BuildContext(items_by_class, vehicles_by_class, guid_to_class,
                        manufacturers, ammo_params, translations, vehicle_impls,
-                       inventory_containers, gimbal_modifiers, weapon_pool_sizes)
+                       inventory_containers, gimbal_modifiers, weapon_pool_sizes,
+                       shield_pool_sizes)
 
     # Build output
     categories = args.only if args.only else list(BUILDERS.keys())

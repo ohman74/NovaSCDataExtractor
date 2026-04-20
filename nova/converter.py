@@ -98,6 +98,17 @@ def convert_entities(config, entity_files, max_workers=4):
             results[f] = xml_candidate
             already_converted += 1
         elif f.endswith(".xml"):
+            # File has .xml extension but could still be CryXML binary.
+            # Check the first bytes: text XML starts with "<", binary
+            # starts with "CryXmlB" magic.
+            try:
+                with open(f, "rb") as fh:
+                    head = fh.read(8)
+                if head.startswith(b"CryXmlB") or head.startswith(b"CryXml"):
+                    to_convert.append(f)
+                    continue
+            except OSError:
+                pass
             results[f] = f
             already_converted += 1
         else:
