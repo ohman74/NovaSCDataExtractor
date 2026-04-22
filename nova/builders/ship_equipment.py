@@ -6,8 +6,21 @@ from .stditem import build_std_item
 def _is_non_equippable(class_name):
     """Filter out items that can't be equipped on player ships/vehicles.
 
-    Note: kept narrower than "truly non-equippable" because SPViewer's reference
-    includes some items that are technically static-scene or special (RADR_*_Fake,
+    Name-based by necessity (#7 in NAME_FILTERS.md, investigated 2026-04-21):
+    - Templates (133 caught): share `name == @LOC_PLACEHOLDER` + no
+      manufacturer with 60+ legitimate items (Locker_PH,
+      GRIN_ROC_CargoGrid_Main, Colonialism_Outpost_*, bay doors, RN_*
+      resource nodes, etc.) that SPViewer's reference catalogue keeps.
+      No tighter structural filter exists.
+    - LowPoly duplicates (27 caught): byte-for-byte identical to the real
+      item — same components, same attachDef. The `_LowPoly` suffix is
+      CIG's only discriminator.
+    - Test/Master (8), PUDefenseTurret (3), Ground_Destructible (29),
+      PU_AI_VAN (4): editorial NPC flags. Tag/manufacturer profiles
+      overlap with real equipment.
+
+    Kept narrower than "truly non-equippable" because the reference
+    catalogue includes some static-scene items (RADR_*_Fake,
     Colonialism_Outpost_*, Orbital_Sentry_*, GATS_*_fps_balance).
     """
     cn = class_name.lower()

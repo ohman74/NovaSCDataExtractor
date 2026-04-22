@@ -6,8 +6,10 @@ from ..vehicle_impl_parser import get_vehicle_impl_data
 # Movement classes that indicate ground vehicles (case-insensitive)
 _GROUND_MOVEMENT_CLASSES = {"arcadewheeled", "wheeled", "tracked"}
 
-# Patterns that indicate non-player variants
-_EXCLUDED_PATTERNS = [
+# ClassName infixes for NPC / mission / template variants that re-use the same
+# record shape as a player ship. See `_is_ai_or_excluded_variant` below for why
+# this is name-based rather than structural.
+_AI_MISSION_PATTERNS = [
     "_PU_AI_", "_EA_AI_", "_Unmanned_", "_Template",
     "_S42_", "_AI_", "_NPC_", "_Dummy",
     "_Derelict_", "_Wreck", "_NoDebris",
@@ -15,8 +17,34 @@ _EXCLUDED_PATTERNS = [
     "_NoInterior", "_Drug_", "_Piano",
     "_Tutorial", "_FW22NFZ",
     "_GameMaster", "_Invictus", "_FW_25",
-    "_Prison",
+    "_Prison", "_Mission_",
+    # Event paint / commemorative variants. The *_ShipShowdown / *_Showdown
+    # 2949 BIS ships stay — those are still on the pledge store. Later-year
+    # BIS paints (_BIS2950/2951/2024_Temp) and Fleetweek / year-stamped
+    # CitizenCon skins aren't purchasable and duplicate their base ship.
+    # Plain "_CitizenCon" (no year) is a genuine ship name (Valkyrie
+    # Liberator Edition) — don't catch it.
+    "_Fleetweek", "_BIS", "_CitizenCon2",
+    # Scripted mission / faction variants.
+    # _Advocacy: Advocacy-police NPC variants (e.g. ANVL_Valkyrie_Advocacy
+    #   is byte-identical to base Valkyrie — loadout/paint applied at spawn).
+    # _Indestructible: pinned-mission NPCs with SHealthComponentParams
+    #   removed — can't be damaged, not a valid player ship.
+    "_Advocacy", "_Indestructible",
 ]
+
+# Explicit per-ClassName exclusions that don't fit a shared infix pattern
+# AND are flagged `ReadyToInclude` by CIG (so `_is_not_included` doesn't
+# catch them). Each entry has a one-line justification; revisit when CIG's
+# inventory changes. Verified against the RSI ship-matrix
+# (`py compare_matrix.py`).
+_NOT_PLAYER_OWNABLE = frozenset({
+    # Ships that aren't cosmetic twins of any sibling but still shouldn't
+    # ship as player-flyable. Cosmetic/paint variants are identified
+    # algorithmically by `_is_cosmetic_variant` — do NOT add those here.
+    "ANVL_Lightning_F8",            # F8A military-spec; has no sibling base on the same impl (player owns F8C only).
+    "ORIG_600i_Executive_Edition",  # Classifier says FUNCTIONAL (different landingSystem, inventoryContainer, Exec turret); retired SKU per product decision.
+})
 
 
 def _is_ground_vehicle(vehicle):
@@ -27,121 +55,123 @@ def _is_ground_vehicle(vehicle):
 
 
 def _is_salvageable_debris(record):
-    """Return True if the record is salvageable debris."""
-    path = record.get("path", "")
-    class_name = record.get("className", "")
-    return "salvagable" in path.lower() or "salvageable" in path.lower() or class_name.startswith("SalvageableDebris")
+    """Return True if the record is salvageable debris.
+
+    Structural signal: `vehicle.movementClass == "Dummy"`. Debris records are
+    static space-junk hulks spawned by the salvage missions; CIG flags them
+    with the Dummy movement class rather than a real one. Verified against
+    the full 920-record corpus: every `movementClass=="Dummy"` record is a
+    SalvageableDebris and vice-versa.
+    """
+    return record.get("vehicle", {}).get("movementClass", "") == "Dummy"
+
+
+def _is_placeholder_record(record):
+    # Template / uninitialised vehicle record: vehicleName set to @LOC_UNINITIALIZED
+    # or VehicleComponentParams.vehicleDefinition empty (no impl XML ref).
+    # These two fields together catch pure templates (Spaceship_Template,
+    # *_Template entries with empty impl ref) and unmanned placeholders where
+    # the record is structurally incomplete.
+    vehicle = record.get("vehicle", {})
+    if vehicle.get("vehicleName") == "@LOC_UNINITIALIZED":
+        return True
+    if not vehicle.get("vehicleDefinition"):
+        return True
+    return False
+
+
+def _is_not_included(class_name, ctx):
+    # CIG's StaticEntityClassData/EAEntityDataParams.inclusionMode = "DoNotInclude"
+    # marks a record as not-for-PU (WIP rebalances, retired variants). Strong
+    # structural exclusion signal — complements the name-based AI/mission
+    # filter but does not replace it (AI variants are usually ReadyToInclude
+    # because they do ship in the PU build, just not as player-ownable).
+    return ctx.inclusion_modes.get(class_name) == "DoNotInclude"
+
+
+def _is_cosmetic_variant(class_name, ctx):
+    # Identified by nova.cosmetic_classifier: this record differs from
+    # another ship sharing the same vehicleDefinition only in cosmetic
+    # fields (palette, localization, interior art, paint ports, rename-only
+    # modification blocks, or item-level cosmetic twins). Keep the base
+    # ClassName only; variant is a paint/skin duplicate.
+    return class_name in ctx.cosmetic_variants
+
+
+def _has_seat_port(loadout):
+    """Return True if any port in the loadout tree is a seat."""
+    if not isinstance(loadout, list):
+        return False
+    for entry in loadout:
+        if not isinstance(entry, dict):
+            continue
+        if "seat" in entry.get("portName", "").lower():
+            return True
+        if _has_seat_port(entry.get("children", [])):
+            return True
+    return False
+
+
+def _is_non_pilotable(record):
+    """Return True if the vehicle record has no seat port in its default loadout.
+
+    Static entities (orbital sentries, comms probes, mission-objective
+    destructibles) and derelict hulls are coded as Vehicle_Spaceship but
+    carry no pilot or driver seat, so players can't enter them. Real player
+    vehicles always have at least one `hardpoint_seat_*` port in their
+    defaultLoadout — verified across all 920 vehicle records: the only
+    records missing any seat port are templates, derelicts, SalvageableDebris,
+    orbital sentries, comms probes, and EAObjectiveDestructable entities.
+    """
+    loadout = record.get("components", {}).get("defaultLoadout", [])
+    return not _has_seat_port(loadout)
 
 
 def _is_ai_or_excluded_variant(class_name):
-    """Return True if this is an AI/unmanned/template variant to exclude."""
+    """Return True if this is an AI / mission / template variant to exclude.
+
+    Name-based by necessity. Audit on 2026-04-20 against 920 vehicle records in
+    Game2.xml confirmed that AI, mission and template variants
+    (`*_PU_AI_*`, `*_Boarded`, `*_Hijacked`, `*_AI_Template`, etc.) are
+    structurally near-identical copies of their player base record: same
+    component set, same VehicleComponentParams attribute shape, same
+    SAttachableComponentParams.AttachDef, same defaultLoadout shape.
+    The only discriminator inside the dataforge is the className suffix
+    injected by mission designers. Shop / spawn references that would
+    discriminate them live outside Game2.xml (ObjectContainers, mission XMLs).
+
+    `_is_placeholder_record` handles the subset that DOES have a structural
+    signal (templates with `@LOC_UNINITIALIZED` vehicleName or empty
+    vehicleDefinition). This function handles the rest.
+    """
     cn = class_name
-    for pat in _EXCLUDED_PATTERNS:
+    if cn in _NOT_PLAYER_OWNABLE:
+        return True
+    for pat in _AI_MISSION_PATTERNS:
         if pat in cn:
             return True
 
-    # Orbital sentries, probes, EA destructibles
-    cn_lower = cn.lower()
-    if any(p in cn_lower for p in [
-        "orbital_sentry", "probe_comms", "eaobjectivedestructable",
-        "securitynetwork",
-    ]):
-        return True
-
-    # Apollo tier variants (Tier_1/2/3 are module configs, not separate ships)
+    # Apollo med-bed module-config sub-variants (`*_Tier_1/2/3`). These
+    # share vehicleName, vehicleDefinition, and every structural field with
+    # the Apollo_Medivac/Triage base — only the defaultLoadout differs
+    # (which medical module ships are pre-installed). CIG's `_Tier_N`
+    # ClassName suffix is the convention tag for this. Attempted structural
+    # dedup (by shared vehicleName) but it over-matched legitimate sibling
+    # Collector_*/Exec_* variants that happen to share vehicleName, so the
+    # name tag stays as last-resort.
     if "_Tier_" in cn:
         return True
 
-    # Javelin (not flight-ready)
-    if cn == "AEGS_Javelin":
-        return True
-
-    # Mantis unmanned
+    # `*_Unmanned` suffix variants (Mantis, 890Jump, Spirit_C1, Nomad, Hull_C,
+    # Zeus_ES, 600i). These are byte-for-byte copies of the base record —
+    # same components, same attachDef, same vehicle fields, same loadout —
+    # added by mission designers as a separate ClassName for scripted
+    # `Unmanned` encounters. Verified against Game2.xml: no structural diff
+    # separates them from the base. Name suffix stays as last-resort.
     if cn.endswith("_Unmanned"):
         return True
 
     return False
-
-
-def _is_paint_only_variant(class_name, record, ctx):
-    """Return True if this variant's component loadout is identical to a base ship.
-
-    Compares weapons, shields, coolers, power plants, quantum drives, radar, missiles
-    against potential base ships. If components match → paint-only → exclude.
-    If components differ → keep.
-    """
-    base_name = _find_base_ship(class_name, ctx)
-    if not base_name:
-        return False  # No base found, keep it
-
-    base_record = ctx.vehicles.get(base_name)
-    if not base_record:
-        return False
-
-    base_sig = _loadout_signature(base_record)
-    variant_sig = _loadout_signature(record)
-
-    return base_sig == variant_sig
-
-
-def _find_base_ship(class_name, ctx):
-    """Find the base ship by progressively removing trailing segments.
-
-    AEGS_Eclipse_BIS2950 -> tries AEGS_Eclipse_BIS2950 (self, skip)
-                         -> tries AEGS_Eclipse (found!)
-    ANVL_Hornet_F7A_Mk2_Exec_Military -> tries ...Mk2_Exec_Military (self)
-                                       -> tries ...Mk2_Exec (exists? check)
-                                       -> tries ...Mk2 (exists? check)
-    """
-    parts = class_name.split("_")
-
-    # Try removing segments from the end, one at a time
-    for i in range(len(parts) - 1, 1, -1):
-        candidate = "_".join(parts[:i])
-        if candidate == class_name:
-            continue
-        if candidate in ctx.vehicles:
-            # Make sure it's a real vehicle (not just any entity)
-            veh = ctx.vehicles[candidate].get("vehicle", {})
-            if veh.get("vehicleName"):
-                return candidate
-
-    return None
-
-
-def _loadout_signature(record):
-    """Get a frozenset of (portName, entityClassName) for component-level comparison.
-
-    Excludes cosmetic ports (paint, flair) and structural ports (thrusters, engines,
-    retro, doors, seats, screens) that don't represent swappable equipment choices.
-    """
-    dl = record.get("components", {}).get("defaultLoadout", [])
-    pairs = set()
-
-    _SKIP_PORTS = [
-        "paint", "flair", "thruster", "engine", "retro", "vtol",
-        "seat", "door", "screen", "dashboard", "display", "relay",
-        "light", "engineering", "docking", "fuel_port", "air_traffic",
-        "controller_door", "controller_light", "controller_comms",
-        "controller_energy", "controller_capacitor", "controller_fuel",
-        "controller_missile", "controller_weapon", "controller_salvage",
-        "landingpad", "selfdestr", "self_destr", "cargogrid",
-        "ramp", "tractor_carriage", "tractor_mount",
-    ]
-
-    def walk(entries):
-        for e in entries:
-            pn = e.get("portName", "")
-            cn = e.get("entityClassName", "")
-            ref = e.get("entityClassReference", "")
-            pn_lower = pn.lower()
-            if pn and not any(skip in pn_lower for skip in _SKIP_PORTS):
-                pairs.add((pn, cn or ref))
-            for c in e.get("children", []):
-                walk([c])
-
-    walk(dl)
-    return frozenset(pairs)
 
 
 def build_ships(ctx):
@@ -154,9 +184,15 @@ def build_ships(ctx):
             continue
         if _is_salvageable_debris(record):
             continue
+        if _is_placeholder_record(record):
+            continue
+        if _is_non_pilotable(record):
+            continue
+        if _is_not_included(class_name, ctx):
+            continue
         if _is_ai_or_excluded_variant(class_name):
             continue
-        if _is_paint_only_variant(class_name, record, ctx):
+        if _is_cosmetic_variant(class_name, ctx):
             continue
 
         ship = _build_ship(class_name, record, ctx)
@@ -967,107 +1003,213 @@ def _compute_missile_damage(hardpoint_entry, ctx):
 # Port classification rules
 # ──────────────────────────────────────────────────────────────────────
 
-def _classify_port(port_name, item_type=""):
-    """Classify a loadout entry into its hardpoint category."""
+# Port-def type strings (case-insensitive) that should never emit a loadout
+# entry. Derived from the 10 374-port corpus: these are controllers, seats,
+# doors, radar pings, animation rooms, AI module slots, regen pools, etc.
+# Anything whose port type is exclusively one of these is skipped.
+_SKIP_PORT_TYPES = frozenset({
+    # Seats and seat accessors
+    "seataccess", "seat", "seatdashboard",
+    # Doors and door-related
+    "door",
+    # Controllers (decoration / UI / sub-systems with no gameplay hardpoint)
+    "weaponcontroller", "doorcontroller", "lightcontroller", "energycontroller",
+    "commscontroller", "coolercontroller", "shieldcontroller",
+    "capacitorassignmentcontroller", "missilecontroller", "fuelcontroller",
+    "salvagecontroller", "airtrafficcontroller", "miningcontroller",
+    "wheeledcontroller", "targetselector",
+    # Animation / interior / structural shells
+    "room", "interior", "crosssection", "attachedpart",
+    # Helpers / ambient systems / avionics that aren't gameplay hardpoints
+    "landingsystem", "ping", "scanner", "aimodule", "display", "light",
+    "multilight", "battery", "computer", "controlpanel", "avionics",
+    "dockinganimator", "dockingcollar", "gravitygenerator", "relay",
+    "transponder", "noitem_vehicle",
+    # Regen-pool slots expose power routing, not weapons
+    "weaponregenpool",
+})
+# Note: `Misc` / `Misc.Misc` / `Usable` / `Useable` are intentionally NOT in
+# the skip set. CIG uses Misc as a catch-all and spells Usable both ways; in
+# all cases the name-based fallback below disambiguates. Skipping would drop
+# legitimate entries whose impl XML gave no meaningful type.
+
+
+def _classify_port(port_name, item_type="", port_def=None, item_record=None):
+    """Classify a loadout entry into its hardpoint category.
+
+    Primary discriminator: port_def["types"] from the vehicle-impl XML — each
+    entry is a structural `Type.SubType` string CIG assigns to the mount
+    (e.g. `WeaponGun.Gun`, `Turret.GunTurret`, `Shield`, `Armor`). Secondary:
+    the installed item's attachDef.type. Name-based matching is preserved
+    only for the handful of categories with no single-type signal
+    (Mining/Salvage/Utility/Storage/WeaponsRacks/Modules) — each such branch
+    is clearly labelled below.
+
+    Args:
+        port_name: the loadout entry's portName (`hardpoint_*`).
+        item_type: attachDef.type of the installed item, if any.
+        port_def: vehicle-impl port definition dict (types, portTags, flags)
+            for this port, or {} if no impl data is available.
+        item_record: full item record, if resolved. Used for thruster sub-
+            classification via SCItemThrusterParams.thrusterType.
+    """
     pn = port_name.lower()
-    it = item_type.lower()
+    it = (item_type or "").lower()
+    port_def = port_def or {}
+    types = [t.lower() for t in port_def.get("types", []) or []]
+    port_tags = (port_def.get("portTags", "") or "").lower()
 
-    # Skip non-gameplay ports
-    if any(skip in pn for skip in [
-        "seat_access", "seat_pilot", "seat_copilot", "seat_passenger",
-        "escape_pod", "display_hud", "screen_", "cockpit_radar",
-        "dashboard", "door_", "relay_", "engineeringscreen",
-        "lightgroup", "light_", "controller_door", "controller_light",
-        "controller_comms", "controller_energy", "controller_capacitor",
-        "controller_fuel", "controller_missile", "controller_weapon",
-        "controller_cooler",
-        "docking_collar", "fuel_port", "air_traffic",
-        "bed_", "battery", "avionics",
-    ]):
-        return None
-
-    # WeaponsRacks
+    # Weapon-rack ports use a Door mechanism (opens to reveal the rack), so
+    # the port's type is Door even though the hardpoint is a rack. Check the
+    # port name first so these don't get skipped by the Door rule below.
     if "weapon_rack" in pn:
         return "WeaponsRacks"
 
-    # Weapons — ports with "gun_", "weapon_pilot", ending in "_Weapon", or "hardpoint_weapon_"
-    if (any(p in pn for p in ["gun_", "weapon_pilot", "hardpoint_weapon_"]) or pn.endswith("_weapon")) and "turret" not in pn and "rack" not in pn and "controller" not in pn:
-        return "PilotWeapons"
-    if "tractor" in pn and "turret" in pn:
-        return "UtilityHardpoints"
-    if "turret_base" in pn or "turret_upper" in pn or "turret_lower" in pn:
-        return "Turrets"
-    if "turret" in pn and "seataccess" not in pn and "controller" not in pn:
-        return "Turrets"
-    if "missilerack" in pn or "missile_rack" in pn:
-        return "MissileRacks"
-    if "bomb" in pn:
-        return "BombRacks"
-    if "cm_launcher" in pn or "countermeasure" in pn:
-        return "Countermeasures"
-    if "mining" in pn and "controller" not in pn:
-        return "MiningHardpoints"
-    if "salvage" in pn and "controller" not in pn:
-        return "SalvageHardpoints"
-    if ("interdiction" in pn or "quantum_enforcement" in pn or "interdiction_device" in pn) and "controller" not in pn:
-        return "InterdictionHardpoints"
-    if "utility" in pn:
-        return "UtilityHardpoints"
-
-    # Components - Propulsion
-    if "powerplant" in pn or "power_plant" in pn:
-        return "PowerPlants"
-    if "quantum_drive" in pn or "quantumdrive" in pn:
-        return "QuantumDrives"
-    if ("engine" in pn or "thruster_main" in pn or "main_thruster" in pn) and "engineering" not in pn:
-        return "MainThrusters"
-    if "retro" in pn:
-        return "RetroThrusters"
-    if "thruster_vtol" in pn:
-        return "VtolThrusters"
-    if "thruster" in pn and "vtol" not in pn:
-        return "ManeuveringThrusters"
-    if "quantum_fuel" in pn:
-        return "QuantumFuelTanks"
-    if "fuel_tank" in pn:
-        return "HydrogenFuelTanks"
-
-    # Components - Systems
-    # Shield controllers: not emitted at Hardpoints level (ref convention)
-    if "controller_shield" in pn:
+    # ── Structural skip: port types that never carry a gameplay hardpoint. ──
+    # Skip only when *every* declared type on the port is in the skip set;
+    # a port that also lists e.g. Turret.GunTurret should keep going.
+    if types and all(t in _SKIP_PORT_TYPES for t in types):
         return None
-    if "controller_flight" in pn or "flight_blade" in pn:
-        return "FlightBlade"
-    if ("shield" in pn) and "controller" not in pn:
-        return "Shields"
-    if ("cooler" in pn) and "controller" not in pn:
+    # `Usable` is the one genuinely ambiguous type: used for weapon racks,
+    # weapon lockers, cockpit mounts, and some ground-vehicle cargo slots.
+    # Don't decide based on type alone — let the name-based rules below
+    # handle it (weapon_rack / cargogrid / storage patterns).
+
+    # ── Structural primary rules (type allow-lists) ──
+    # Order matters for ports carrying multiple types (gimballed guns list
+    # both Turret.GunTurret and WeaponGun.Gun — WeaponGun wins).
+    has_type = lambda prefix: any(t == prefix or t.startswith(prefix + ".") for t in types)
+
+    # Weapons and weapon-like mounts. Missile/bomb racks that also carry a
+    # WeaponGun.Rocket type must be matched BEFORE the WeaponGun branch
+    # (bomb racks list both).
+    if has_type("missilelauncher"):
+        # Storage racks on capital ships (e.g. Perseus torpedo storage) carry
+        # a MissileLauncher type but are ammo storage rather than launchers.
+        # The structural giveaway is that these ports live under `*_storage_*`
+        # port names; if a dedicated tag emerges, prefer that.
+        if "torpedo_storage" in pn or "missile_storage" in pn:
+            return "Storage"
+        return "MissileRacks"
+    if has_type("bomblauncher"):
+        return "BombRacks"
+    if has_type("weapongun"):
+        return "PilotWeapons"
+    if has_type("weapondefensive"):
+        return "Countermeasures"
+    if has_type("quantuminterdictiongenerator"):
+        return "InterdictionHardpoints"
+
+    # Turrets — after weapons so gimballed guns (Turret.GunTurret + WeaponGun)
+    # are classified as PilotWeapons, not Turrets.
+    if has_type("turret"):
+        # Tractor-beam turrets carry Turret.GunTurret but belong under
+        # UtilityHardpoints. Structural signal: port name ends in
+        # `_tractor_turret` / contains tractor_beam; no cleaner type signal
+        # exists in the corpus.
+        if "tractor" in pn:
+            return "UtilityHardpoints"
+        return "Turrets"
+    # UtilityTurret (e.g. Cyclone mining cab). Falls after Turret since it
+    # currently lands in MiningHardpoints by port name convention.
+    if has_type("utilityturret") and "mining" in pn:
+        return "MiningHardpoints"
+
+    # Thrusters — primary signal is port type (MainThruster vs
+    # ManneuverThruster), but VTOL isn't encoded as a distinct type; it's
+    # on the installed item's SCItemThrusterParams.thrusterType. VTOL check
+    # wins over the plain thruster-type categories.
+    thruster_type_attr = ""
+    if item_record:
+        tp = item_record.get("components", {}).get("SCItemThrusterParams", {})
+        if isinstance(tp, dict):
+            thruster_type_attr = (tp.get("thrusterType", "") or "").lower()
+    if has_type("mainthruster") or has_type("manneuverthruster"):
+        if thruster_type_attr == "vtol" or "vtol" in pn:
+            return "VtolThrusters"
+        if thruster_type_attr == "retro" or "retro" in pn:
+            return "RetroThrusters"
+        if has_type("mainthruster") or thruster_type_attr == "main":
+            return "MainThrusters"
+        return "ManeuveringThrusters"
+
+    # Propulsion / systems / avionics — one-to-one type mapping.
+    if has_type("powerplant"):
+        return "PowerPlants"
+    if has_type("cooler"):
         return "Coolers"
-    if "lifesupport" in pn or "life_support" in pn:
-        return "LifeSupport"
-    if "fuel_intake" in pn:
-        return "FuelIntakes"
-    if "selfdestruct" in pn or "self_destruct" in pn:
-        return "SelfDestruct"
-
-    # Components - Avionics
-    if "radar" in pn and "controller" not in pn:
+    if has_type("shield"):
+        return "Shields"
+    if has_type("quantumdrive"):
+        return "QuantumDrives"
+    if has_type("radar"):
         return "Radars"
-
-    # Components - Other
-    if "armor" in pn or "armour" in pn:
+    if has_type("lifesupportgenerator") or has_type("lifesupportsystem"):
+        return "LifeSupport"
+    if has_type("fuelintake"):
+        return "FuelIntakes"
+    if has_type("quantumfueltank"):
+        return "QuantumFuelTanks"
+    if has_type("fueltank"):
+        return "HydrogenFuelTanks"
+    if has_type("armor"):
         return "Armor"
-    if "paint" in pn:
-        return "Paints"
-    if "flair" in pn:
-        return "Flairs"
-    if "cargogrid" in pn or "cargo_grid" in pn:
+    if has_type("cargogrid"):
         return "CargoGrids"
-    if "storage" in pn or "personal_storage" in pn:
-        return "Storage"
-    if "module" in pn:
+    if has_type("selfdestruct"):
+        return "SelfDestruct"
+    if has_type("flightcontroller"):
+        return "FlightBlade"
+    if has_type("paints"):
+        return "Paints"
+    if has_type("flair_cockpit"):
+        return "Flairs"
+
+    # Salvage family — structural types are several variants.
+    # (SalvageController is already in _SKIP_PORT_TYPES.)
+    if (has_type("salvagefieldsupporter") or has_type("salvagefillerstation")
+            or "salvagemount" in port_tags):
+        return "SalvageHardpoints"
+    if has_type("toolarm") and ("salvage" in pn or "salvagemount" in port_tags):
+        return "SalvageHardpoints"
+    if has_type("toolarm") and "mining" in pn:
+        return "MiningHardpoints"
+
+    # Module attach slots — swappable module bays on ships like the Cyclone
+    # carry both TurretBase.MannedTurret and Container.CargoGrid; the port
+    # name is the only discriminator against plain turret/cargo ports.
+    # Check BEFORE Cargo/Container rules so module-attach doesn't get
+    # misrouted into CargoGrids/Storage.
+    if "module" in pn and (
+        has_type("module") or has_type("turretbase")
+        or has_type("cargo") or has_type("container")
+    ):
+        return "Modules"
+    if has_type("module"):
         return "Modules"
 
-    # Fallback on item type
+    # `Cargo` / `Container.Cargo` / `Container.CargoGrid` — polymorphic: the
+    # type alone doesn't distinguish cargo grids, mining pods, personal
+    # storage, and module swaps. Dispatch on port name.
+    if has_type("cargo") or has_type("container"):
+        if "mining" in pn:
+            return "MiningHardpoints"
+        if "cargogrid" in pn or "cargo_grid" in pn:
+            return "CargoGrids"
+        return "Storage"
+
+    # EMP weapons — `EMP` type is used for the Warlock and Raven EMP devices
+    # that mount in pilot-weapon slots.
+    if has_type("emp"):
+        return "PilotWeapons"
+
+    # Modules — Room mount for swappable interior rooms (Apollo, Retaliator).
+    if has_type("room") and "module" in pn:
+        return "Modules"
+
+    # ── Secondary: installed-item attachDef.type allow-list ──
+    # Fires when the port_def has no types entry (e.g. port not in the impl
+    # XML, or sub-ports discovered only through the loadout tree).
     if "weapongun" in it:
         return "PilotWeapons"
     if "missilelauncher" in it:
@@ -1088,6 +1230,104 @@ def _classify_port(port_name, item_type=""):
         return "Radars"
     if "paints" in it:
         return "Paints"
+
+    # ── Name-based last-resort (documented cases with no single structural
+    # signal in the corpus, plus graceful degradation when port_def is empty
+    # because the loadout references a port not in the impl XML). ──
+    # (weapon_rack is handled at the very top — its Door-typed ports would
+    # otherwise be skipped.)
+
+    # Mining/salvage: no single structural type — both mix Container.Cargo,
+    # UtilityTurret, ToolArm, SeatAccess etc. depending on ship.
+    if "mining" in pn and "controller" not in pn:
+        return "MiningHardpoints"
+    if "salvage" in pn and "controller" not in pn:
+        return "SalvageHardpoints"
+
+    # The following branches fire when port_def lacks structural types (the
+    # loadout references a port the vehicle-impl XML did not define) OR
+    # when the only types are semantically empty (`Misc`, `Misc.Misc`,
+    # `Usable`). Without them the classifier would drop legitimate entries.
+    types_are_meaningless = not types or all(
+        t in ("misc", "misc.misc", "usable", "useable") for t in types
+    )
+    if types_are_meaningless:
+        if "powerplant" in pn or "power_plant" in pn:
+            return "PowerPlants"
+        if "quantum_drive" in pn or "quantumdrive" in pn:
+            return "QuantumDrives"
+        if "quantum_fuel" in pn:
+            return "QuantumFuelTanks"
+        if "fuel_tank" in pn:
+            return "HydrogenFuelTanks"
+        if "fuel_intake" in pn:
+            return "FuelIntakes"
+        if ("engine" in pn or "thruster_main" in pn or "main_thruster" in pn) and "engineering" not in pn:
+            return "MainThrusters"
+        if "retro" in pn:
+            return "RetroThrusters"
+        if "thruster_vtol" in pn:
+            return "VtolThrusters"
+        if "thruster" in pn and "vtol" not in pn:
+            return "ManeuveringThrusters"
+        if "controller_shield" in pn:
+            return None
+        if "controller_flight" in pn or "flight_blade" in pn:
+            return "FlightBlade"
+        if "shield" in pn and "controller" not in pn:
+            return "Shields"
+        if "cooler" in pn and "controller" not in pn:
+            return "Coolers"
+        if "lifesupport" in pn or "life_support" in pn:
+            return "LifeSupport"
+        if "selfdestruct" in pn or "self_destruct" in pn:
+            return "SelfDestruct"
+        if "radar" in pn and "controller" not in pn:
+            return "Radars"
+        if "armor" in pn or "armour" in pn:
+            return "Armor"
+        if "paint" in pn:
+            return "Paints"
+        if "flair" in pn:
+            return "Flairs"
+        if "cargogrid" in pn or "cargo_grid" in pn:
+            return "CargoGrids"
+        if "cm_launcher" in pn or "countermeasure" in pn:
+            return "Countermeasures"
+        if "missilerack" in pn or "missile_rack" in pn:
+            return "MissileRacks"
+        if "bomb" in pn:
+            return "BombRacks"
+        if ("interdiction" in pn or "quantum_enforcement" in pn or "interdiction_device" in pn) and "controller" not in pn:
+            return "InterdictionHardpoints"
+        if "utility" in pn:
+            return "UtilityHardpoints"
+        if "tractor" in pn and "turret" in pn:
+            return "UtilityHardpoints"
+        if "turret_base" in pn or "turret_upper" in pn or "turret_lower" in pn:
+            return "Turrets"
+        if "turret" in pn and "seataccess" not in pn and "controller" not in pn:
+            return "Turrets"
+        if (any(p in pn for p in ["gun_", "weapon_pilot", "hardpoint_weapon_"]) or pn.endswith("_weapon")) and "turret" not in pn and "rack" not in pn and "controller" not in pn:
+            return "PilotWeapons"
+        if "storage" in pn or "personal_storage" in pn:
+            return "Storage"
+        if "module" in pn:
+            return "Modules"
+        # Skip-name patterns (seat/display/door/controller) for ports with
+        # no types entry.
+        if any(skip in pn for skip in [
+            "seat_access", "seat_pilot", "seat_copilot", "seat_passenger",
+            "escape_pod", "display_hud", "screen_", "cockpit_radar",
+            "dashboard", "door_", "relay_", "engineeringscreen",
+            "lightgroup", "light_", "controller_door", "controller_light",
+            "controller_comms", "controller_energy", "controller_capacitor",
+            "controller_fuel", "controller_missile", "controller_weapon",
+            "controller_cooler",
+            "docking_collar", "fuel_port", "air_traffic",
+            "bed_", "battery", "avionics",
+        ]):
+            return None
 
     return None
 
@@ -1172,14 +1412,15 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
         if item_record:
             item_type = item_record.get("attachDef", {}).get("type", "")
 
-        category = _classify_port(port_name, item_type)
+        # Port definition from vehicle impl — carries the structural `types`
+        # list the classifier keys on.
+        port_def = port_defs.get(port_name, {})
+
+        category = _classify_port(port_name, item_type, port_def, item_record)
         if not category:
             continue
 
         children = entry.get("children", [])
-
-        # Get port definition from vehicle impl if available
-        port_def = port_defs.get(port_name, {})
 
         # Build the entry differently based on category
         if category in ("MainThrusters", "RetroThrusters", "VtolThrusters", "ManeuveringThrusters"):
@@ -1230,7 +1471,7 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
         item_type = ""
         if port_def and port_def.get("types"):
             item_type = port_def["types"][0]
-        category = _classify_port(port_name, item_type)
+        category = _classify_port(port_name, item_type, port_def)
         if category and category in ("Paints", "Flairs"):
             # Count empty paint/flair ports (they represent a customizable slot)
             hp = {"PortName": port_name, "Uneditable": False}
@@ -1468,7 +1709,7 @@ def _add_impl_only_ports(tree, impl_ports, loadout_port_names):
         pname = port.get("name", "")
         if pname and pname not in loadout_port_names:
             item_type = port["types"][0] if port.get("types") else ""
-            category = _classify_port(pname, item_type)
+            category = _classify_port(pname, item_type, port)
             if category and category in ("Paints", "Storage"):
                 hp = {"PortName": pname, "Uneditable": port.get("uneditable", False),
                       "MinSize": port.get("minSize", 0), "MaxSize": port.get("maxSize", 0),
@@ -1479,7 +1720,7 @@ def _add_impl_only_ports(tree, impl_ports, loadout_port_names):
             sub_name = sub.get("name", "")
             if sub_name and sub_name not in loadout_port_names:
                 item_type = sub["types"][0] if sub.get("types") else ""
-                category = _classify_port(sub_name, item_type)
+                category = _classify_port(sub_name, item_type, sub)
                 if category and category in ("Paints", "Storage"):
                     hp = {"PortName": sub_name, "Uneditable": sub.get("uneditable", False),
                           "MinSize": sub.get("minSize", 0), "MaxSize": sub.get("maxSize", 0),
@@ -1566,7 +1807,9 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
         bl_class = ""
         if base_type in _COMPONENT_TYPES_CLASSED and mfr_code:
             if full_type == "LifeSupportGenerator.UNDEFINED":
-                bl_class = "" if entity_class.startswith("LFSP_S04_") else "Civilian"
+                # Capital-class (size 4) is ship-integrated; smaller sizes
+                # are player-purchasable civilian grade.
+                bl_class = "" if ad.get("size") == 4 else "Civilian"
             else:
                 bl_class = MANUFACTURER_CLASS.get(mfr_code, "")
         entry["BaseLoadout"] = {

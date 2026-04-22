@@ -141,7 +141,7 @@ def get_vehicle_impl_files(config):
 # pass. Extend this list when new CryXML-bearing directories are discovered.
 CRYXML_BINARY_DIRS = [
     os.path.join("Data", "Libs", "Foundry", "Records", "entities", "spaceships"),
-    os.path.join("Data", "Libs", "Foundry", "Records", "entities", "ground"),
+    os.path.join("Data", "Libs", "Foundry", "Records", "entities", "groundvehicles"),
     os.path.join("Data", "Scripts", "Entities", "Vehicles", "Implementations", "Xml"),
 ]
 

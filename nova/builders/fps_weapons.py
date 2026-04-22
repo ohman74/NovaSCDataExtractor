@@ -11,7 +11,18 @@ FPS_WEAPON_TYPES = {"WeaponPersonal", "Knife", "Grenade"}
 
 
 def _is_non_player_fps(class_name, attach_def):
-    """Filter out non-player FPS items."""
+    """Filter out non-player FPS items.
+
+    Name-based by necessity (#8 in NAME_FILTERS.md, investigated
+    2026-04-21): tested "no manufacturer" as a structural signal — would
+    correctly flag vlk_ Vanduul weapons, EntitySpawner_*, and named dev
+    items (JanitorMob, Tablet_Small, Yormandi_Weapon), but would also
+    drop 2 legitimate items (none_melee_01, kegr_fire_extinguisher_01)
+    that have empty manufacturer by design. Mines (_ltp_/_prx_) have
+    real manufacturers but are excluded as "placed not equipped" per
+    reference convention. Carryable_* glowsticks/utensils have proper
+    manufacturers too. No clean structural signal across these classes.
+    """
     cn = class_name.lower()
 
     # Carryable items (glowsticks, utensils, flares)
@@ -66,6 +77,15 @@ def _find_base_weapon(class_name, all_weapons):
 
     Handles both suffix-style (base → base_variant) and numbered variants
     (base_01 → base_02/03/04 by replacing the last numeric suffix with _01).
+
+    Name-based by necessity (#10 in NAME_FILTERS.md): parsed item records
+    carry no `parentRef` / `inheritsFrom` / base-item pointer, and the
+    signature comparison below needs a specific base to diff against. The
+    `SCItemPurchasableParams.displayName` clusters variants together but
+    doesn't identify which cluster member is the base. Segment-stripping
+    matches CIG's ClassName convention (base name is a prefix of variant
+    names). Used only for signature-dedup lookup — not a filter — so a
+    miss is non-fatal.
     """
     parts = class_name.split("_")
     # Try progressive suffix stripping first
@@ -129,8 +149,14 @@ def build_fps_weapons(ctx):
     # Second pass: filter skin variants with identical stats
     weapons = []
     for class_name, weapon in all_weapons.items():
-        # Orphan variant check: if className has "_01_<suffix>" pattern (e.g.
-        # sasu_pistol_toy_01_ea_elim), ref drops the variant entirely.
+        # Name-based orphan check: CIG's `_01_<suffix>` pattern marks
+        # dev/event variants (sasu_pistol_toy_01_ea_elim,
+        # grin_multitool_01_default_grapple, kegr_fire_extinguisher_01_Igniter,
+        # plus all *_01_brown01/red01/tint01 skin variants). The ref
+        # catalogue drops these entirely. Confirmed via experiment: removing
+        # this check lets 3 items through whose signatures legitimately
+        # differ from their base — so signature-dedup alone can't replace
+        # it. Retained as last-resort (#9 in NAME_FILTERS.md).
         parts = class_name.split("_")
         has_01_then_suffix = False
         for idx in range(len(parts) - 1):

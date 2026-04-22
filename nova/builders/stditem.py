@@ -8,6 +8,56 @@ import re
 
 from ..utils import safe_float, safe_int, resolve_name
 
+
+# ──────────────────────────────────────────────────────────────────────
+# FPS item detection
+# ──────────────────────────────────────────────────────────────────────
+
+# Base types that are always FPS equipment (never ship-mounted).
+_FPS_BASE_TYPES = frozenset({
+    "WeaponPersonal",   # all FPS guns, knives, grenades, gadgets
+    "AmmoBox",          # ammo crates (FPS magazines + grenade boxes)
+})
+
+# Full types that are always FPS-only.
+_FPS_FULL_TYPES = frozenset({
+    "Light.Weapon",                      # flashlights on FPS guns
+    "WeaponAttachment.Magazine",
+    "WeaponAttachment.IronSight",
+    "WeaponAttachment.BottomAttachment",
+    "WeaponAttachment.Utility",
+    "WeaponAttachment.Missile",
+})
+
+
+def _is_fps_item(item_type, full_type, attach_def):
+    """Return True if the item is FPS equipment (as opposed to ship/vehicle).
+
+    Structural signal set: base type (WeaponPersonal, AmmoBox) + specific
+    WeaponAttachment full types + the `FPS_Barrel` tag to discriminate
+    FPS vs ship barrels (both use `WeaponAttachment.Barrel`). Replaces the
+    path-based `is_fps` check (#13 in NAME_FILTERS.md) — CLAUDE.md forbids
+    path-based filtering.
+    """
+    if not item_type:
+        return False
+    base = item_type.split(".")[0] if "." in item_type else item_type
+    if base in _FPS_BASE_TYPES:
+        return True
+    if full_type in _FPS_FULL_TYPES:
+        return True
+    if full_type == "WeaponAttachment.Barrel":
+        # FPS barrels tag themselves with `FPS_Barrel`. Ship barrels carry
+        # `uneditable`. The generic `Barrel_Attachment` placeholder lives
+        # under /weapon_modifier/ with empty tags — treat as FPS (it's a
+        # template for FPS barrel modifiers).
+        tags = (attach_def.get("tags", "") or "")
+        if "FPS_Barrel" in tags:
+            return True
+        if not tags:
+            return True
+    return False
+
 # Types for which ref never sets Class, regardless of description.
 # Armor.Medium is handled separately via _ARMOR_MEDIUM_WITH_CLASS allowlist.
 _TYPES_NEVER_CLASS = frozenset({
@@ -295,19 +345,23 @@ def _fps_class_value(class_name, full_type, mfr_code):
     if full_type in ("WeaponAttachment.Barrel", "WeaponAttachment.IronSight",
                       "WeaponAttachment.BottomAttachment", "WeaponAttachment.Missile"):
         return (True, "")
-    # Pattern-based: melee → Melee
-    cn_lower = class_name.lower()
-    if "_melee_" in cn_lower:
+    # Melee weapons are structurally `WeaponPersonal.Knife` (verified against
+    # the full corpus: every _melee_ ClassName has this full_type).
+    if full_type == "WeaponPersonal.Knife":
         return (True, "Melee")
-    # Energy weapons → prefix-based mapping (KLWE/KSAR/LBCO/VOLT/NONE)
+    # Energy vs Ballistic classification is editorial — CIG encodes it in
+    # the FPS weapon's ClassName (*_energy_* / *_ballistic_* / *_multi_*)
+    # rather than in a structural field. The weapon component's fireType
+    # (rapid/sequence/charged/burst) cuts across both classes, and the ammo
+    # record damage-type isn't populated for personal weapons. Keep as a
+    # last-resort name check until CIG exposes a damage-class enum.
+    cn_lower = class_name.lower()
     if "_energy_" in cn_lower:
         prefix = cn_lower.split("_", 1)[0]
         if prefix in _FPS_ENERGY_CLASS_BY_PREFIX:
             return (True, _FPS_ENERGY_CLASS_BY_PREFIX[prefix])
-    # Ballistic and "multi" (none_rifle_multi_01) → Ballistic
     if "_ballistic_" in cn_lower or "_multi_" in cn_lower:
         return (True, "Ballistic")
-    # Default for FPS items: empty Class
     return (True, "")
 
 
@@ -341,15 +395,7 @@ def build_std_item(record, ctx, external_loadout=None, nested=False):
     full_type = f"{item_type}.{sub_type}" if sub_type else item_type
 
     # Detect FPS items (used by several downstream blocks)
-    _FPS_PATH_SUFFIXES_EARLY = (
-        "/scitem/weapons/fps_weapons/",
-        "/scitem/weapons/magazines/",
-        "/scitem/weapons/melee/",
-        "/scitem/weapons/throwable/",
-        "/scitem/weapons/weapon_modifier/",
-    )
-    _path_lower_early = record.get("path", "").lower()
-    is_fps = any(p in _path_lower_early for p in _FPS_PATH_SUFFIXES_EARLY)
+    is_fps = _is_fps_item(item_type, full_type, attach_def)
 
     description = _clean_description(
         ctx.resolve_name(attach_def.get("description", "")), is_fps=is_fps
@@ -383,8 +429,7 @@ def build_std_item(record, ctx, external_loadout=None, nested=False):
 
     # Classification (excluded for nested/InstalledItem)
     if not nested:
-        path = record.get("path", "")
-        classification = _build_classification(full_type, path)
+        classification = _build_classification(full_type, attach_def)
         if classification:
             si["Classification"] = classification
 
@@ -401,26 +446,51 @@ def build_std_item(record, ctx, external_loadout=None, nested=False):
         or base in _BASE_TYPES_NO_MASS
         or (volume_is_one and (base in _BASE_TYPES_NO_MASS_IF_V1 or full_type in _TYPES_NO_MASS_IF_V1))
     )
-    # Container.Cargo: mining pods, Cyclone modules, and cargo-grid placeholders have no Mass.
-    if full_type == "Container.Cargo" and (
-        "Mining" in cn or cn.startswith("TMBL_Cyclone_Module_")
-        or cn.endswith("_CargoGrid_Main")
-    ):
-        skip_mass = True
-    # GroundVehicleMissileLauncher: ship-integrated variants (non-Storm) have no Mass.
-    if full_type == "GroundVehicleMissileLauncher.GroundVehicleMissileRack" and "Storm" not in cn:
-        skip_mass = True
-    # Turret.TopTurret/BottomTurret: remote-turret variants have no Mass.
-    if full_type in ("Turret.TopTurret", "Turret.BottomTurret") and "Remote" in cn:
-        skip_mass = True
+    # Container.Cargo: three classes of ship-integrated items whose mass
+    # isn't meaningful in the standalone record. Matched structurally:
+    # - Mining pods carry a `ResourceContainer` component (dynamic cargo).
+    # - Cyclone swap modules are tagged `TMBL_Cyclone_Module` by CIG.
+    # - Ship-integrated CargoGrid_Main placeholders have a @LOC_PLACEHOLDER
+    #   name + inventory container + volume=1 stub geometry.
+    if full_type == "Container.Cargo":
+        raw_name = attach_def.get("name", "")
+        if "ResourceContainer" in components:
+            skip_mass = True
+        elif attach_def.get("tags") == "TMBL_Cyclone_Module":
+            skip_mass = True
+        elif (raw_name == "@LOC_PLACEHOLDER"
+              and "SCItemInventoryContainerComponentParams" in components
+              and volume_is_one):
+            skip_mass = True
+    # GroundVehicleMissileLauncher: vehicle-integrated rack variants (Nova,
+    # Ballista, Cyclone_MT/AA) point at an existing standard rack by name
+    # (`SCItemPurchasableParams.displayName` references e.g.
+    # `@item_NameMRCK_S03_BEHR_Dual_S02`). Only genuinely standalone racks
+    # (Storm) carry a placeholder displayName. Skip mass on the aliases so
+    # the catalogue doesn't double-count.
+    if full_type == "GroundVehicleMissileLauncher.GroundVehicleMissileRack":
+        purch = components.get("SCItemPurchasableParams", {})
+        display = purch.get("displayName", "") if isinstance(purch, dict) else ""
+        if display and display != "@LOC_PLACEHOLDER":
+            skip_mass = True
+    # Turret.TopTurret/BottomTurret: remote-turret variants have no Mass. The
+    # item's `attachDef.name` is a localization key that identifies the
+    # turret class (`@item_Name_Turret_Manned` vs `@item_Name_Turret_Remote`
+    # vs ship-specific like `@item_NameDRAK_Cutlass_Steel_RemoteTurret`).
+    # Match "Remote" in the name key rather than the ClassName.
+    if full_type in ("Turret.TopTurret", "Turret.BottomTurret"):
+        if "Remote" in attach_def.get("name", ""):
+            skip_mass = True
     # Module.UNDEFINED: ship-integrated modules (placeholder volume) have no Mass.
     if full_type == "Module.UNDEFINED" and (volume_is_one or raw_volume in (0, None, "")):
         skip_mass = True
     # Ship-integrated MissileRack exceptions where ref omits Mass
     if full_type == "MissileLauncher.MissileRack" and cn in _MISSILERACK_WITHOUT_MASS:
         skip_mass = True
-    # Salvage_Head_* SalvageHead items never have Mass (but WEP_TractorBeam/GRIN_TractorBeam do)
-    if full_type == "SalvageHead.UNDEFINED" and cn.startswith("Salvage_Head_"):
+    # SalvageHead.UNDEFINED covers both salvage heads and tractor beams.
+    # Tractor beams carry SDistortionParams (the beam rendering); salvage
+    # heads never do. Skip mass on salvage heads only.
+    if full_type == "SalvageHead.UNDEFINED" and "SDistortionParams" not in components:
         skip_mass = True
     # Per-item allowlist: items that should have Mass despite generic skip rules.
     if cn in _MASS_FORCE_INCLUDE:
@@ -496,9 +566,11 @@ def build_std_item(record, ctx, external_loadout=None, nested=False):
         elif class_name in _CLASS_VALUE_OVERRIDES:
             si["Class"] = _CLASS_VALUE_OVERRIDES[class_name]
         elif base_type in _COMPONENT_TYPES_CLASSED and mfr:
-            # LifeSupport: ship-integrated (LFSP_S04_*) is empty; brand-prefixed = Civilian.
+            # LifeSupport: capital-class (size 4) units are ship-integrated
+            # for Idris/Polaris/890 and carry empty Class; smaller sizes
+            # (S00–S03) are player-purchasable civilian grade.
             if full_type == "LifeSupportGenerator.UNDEFINED":
-                if class_name.startswith("LFSP_S04_"):
+                if attach_def.get("size") == 4:
                     si["Class"] = ""
                 else:
                     si["Class"] = "Civilian"
@@ -750,7 +822,7 @@ def build_std_item(record, ctx, external_loadout=None, nested=False):
     rc = components.get("ResourceContainer")
     inv_comp = components.get("SCItemInventoryContainerComponentParams")
     if ("Container" in item_type or "Cargo" in item_type):
-        _build_cargo_fields(si, rc, inv_comp, record.get("className", ""), ctx)
+        _build_cargo_fields(si, rc, inv_comp, record.get("className", ""), full_type, ctx)
 
     # Ports
     if ports:
@@ -885,27 +957,15 @@ _FPS_SUBTYPE_MAP = {
     ("Light", "Weapon"): ("WeaponAttachment", "Light"),
 }
 
-def _build_classification(full_type, path):
+def _build_classification(full_type, attach_def):
     """Build classification string like 'Ship.WeaponDefensive.CountermeasureLauncher'."""
     if not full_type:
         return ""
-    path_lower = path.lower() if path else ""
-    type_lower = full_type.lower()
-    # FPS items live under specific sub-directories of /scitem/weapons/.
-    # Also flag WeaponPersonal as FPS (always).
-    _FPS_PATH_SUFFIXES = (
-        "/scitem/weapons/fps_weapons/",
-        "/scitem/weapons/magazines/",
-        "/scitem/weapons/melee/",
-        "/scitem/weapons/throwable/",
-        "/scitem/weapons/weapon_modifier/",
-    )
-    is_fps_path = any(p in path_lower for p in _FPS_PATH_SUFFIXES)
-    if is_fps_path or (
-        "personal" in type_lower and "paints" not in type_lower):
-        prefix = "FPS"
-    else:
-        prefix = "Ship"
+    # FPS prefix set via structural FPS-type check. `attach_def` is used for
+    # the Barrel tag disambiguation path inside `_is_fps_item`.
+    prefix = "FPS" if _is_fps_item(
+        full_type.split(".")[0], full_type, attach_def or {}
+    ) else "Ship"
 
     # Split type parts and clean up
     parts = full_type.split(".")
@@ -1772,7 +1832,7 @@ def _resolve_fps_ammo(weapon_data, default_loadout, ctx):
                         k = key.capitalize()
                         shot = val * pellets * dmg_mult
                         fm["DamagePerShot"][k] = shot
-                        fm["DamagePerSecond"][k] = round(shot * rpm / 60.0, 2) if rpm else 0
+                        fm["DamagePerSecond"][k] = round(shot * (rpm / 60.0), 2) if rpm else 0
 
         break  # Only process first magazine
 
@@ -2230,7 +2290,7 @@ def _populate_firing_dps(firing_modes, dps_source):
                     dps_val = round(val * pellets * damage_mult, 2)
                     if dps_val:
                         fm["DamagePerShot"][k] = dps_val
-                        fm["DamagePerSecond"][k] = round(dps_val * rpm / 60.0, 2) if rpm else 0.0
+                        fm["DamagePerSecond"][k] = round(dps_val * (rpm / 60.0), 2) if rpm else 0.0
 
 
 def _apply_blade_modifier(ifcs, class_name):
@@ -2246,6 +2306,13 @@ def _apply_blade_modifier(ifcs, class_name):
     """
     if not class_name:
         return
+    # NOTE (#30 in NAME_FILTERS.md): the classification uses the ClassName
+    # suffix, which mirrors the `SIFCSModifiersLegacy.FlightBlade_HND/SPD`
+    # record the item references via `IFCSParams.modifiersLegacy`. The
+    # proper structural fix would parse those records into ctx and apply
+    # their actual delta values (numbers + vectors) instead of the
+    # hardcoded `sign * 25 / 8 / 10 / 1 / 2` below, which happen to match
+    # the record values in current data. Deferred as a multi-file refactor.
     if class_name.endswith("_Flight_Blade_HND") or class_name.endswith("_Blade_HND"):
         sign = -1
     elif class_name.endswith("_Flight_Blade_SPD") or class_name.endswith("_Blade_SPD"):
@@ -2796,13 +2863,16 @@ def _build_missiles_controller(mc):
     }
 
 
-def _build_cargo_fields(si, rc, inv_comp, class_name, ctx):
+def _build_cargo_fields(si, rc, inv_comp, class_name, full_type, ctx):
     """Build CargoGrid and/or CargoContainers based on item type.
 
-    - Cargo_ShipMining_Pod_*: emit ONLY CargoContainers (includes Collapsed at 0).
-    - Cargo_GroundVehicleMining_Pod_* and *_CargoGrid_Main: emit CargoGrid with
-      Width derived from the InventoryContainer's interiorDimensions (x / 1.25).
-    - Other Container/Cargo types with ResourceContainer: fall back to legacy CargoGrid+CargoContainers.
+    - Ship mining pods (Container.Cargo + ResourceContainer, no inventory
+      container): emit ONLY CargoContainers (including Collapsed at 0).
+    - Ground mining pods (Container.Cargo + ResourceContainer + inventory
+      container) and *_CargoGrid_Main: emit CargoGrid with Width derived
+      from the InventoryContainer's interiorDimensions (x / 1.25).
+    - Other Container/Cargo types with ResourceContainer: fall back to
+      legacy CargoGrid+CargoContainers.
     """
     # Lookup inventory container dimensions via containerParams GUID
     container_guid = ""
@@ -2820,8 +2890,15 @@ def _build_cargo_fields(si, rc, inv_comp, class_name, ctx):
     if not capacity and container_data:
         capacity = safe_float(container_data.get("capacity", 0))
 
-    is_ship_mining = class_name.startswith("Cargo_ShipMining_Pod_")
-    is_ground_mining = class_name.startswith("Cargo_GroundVehicleMining_Pod_")
+    # Ship vs ground mining pods are distinguishable by component set.
+    # Both are `Container.Cargo` + `ResourceContainer`; ground pods ALSO
+    # carry `SCItemInventoryContainerComponentParams` so they dual-report
+    # a grid shape for the player UI. The Container.Cargo gate keeps other
+    # ResourceContainer items (e.g. Container.Medical healing canisters)
+    # out of the mining-pod branches.
+    is_cargo_type = full_type == "Container.Cargo"
+    is_ship_mining = is_cargo_type and bool(rc) and not bool(inv_comp)
+    is_ground_mining = is_cargo_type and bool(rc) and bool(inv_comp)
     is_cargo_grid_main = class_name.endswith("_CargoGrid_Main")
 
     if is_ship_mining:
@@ -2853,7 +2930,12 @@ def _build_cargo_fields(si, rc, inv_comp, class_name, ctx):
         width = float(int(safe_float(dim.get("x", 0)) / 1.25)) if dim else 1.0
         depth = float(int(safe_float(dim.get("y", 0)) / 1.25)) if dim else 0.0
         height = float(int(safe_float(dim.get("z", 0)) / 1.25)) if dim else 0.0
-        # TMBL_Cyclone_CargoGrid_Main is a 1x1x1 placeholder that ref omits.
+        # TMBL_Cyclone_CargoGrid_Main is a 1x1x1 placeholder the ref catalogue
+        # omits. Structurally it looks identical to `ARGO_CSV_CargoGrid_Rear`
+        # and the destroyed-inventory box crates (all three are capacity=1
+        # with 1.25^3 interior dimensions), so there's no generic structural
+        # rule that catches exactly this one. Keep as last-resort className
+        # exception — verify against ref if a similar placeholder surfaces.
         if class_name == "TMBL_Cyclone_CargoGrid_Main":
             return
         cargo_grid = {

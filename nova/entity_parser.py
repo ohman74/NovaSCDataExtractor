@@ -114,61 +114,6 @@ def _parse_port(port_data):
     return port
 
 
-def classify_port(port):
-    """Classify a port into a category based on its types and name.
-
-    Returns one of:
-        'pilotWeapon', 'remoteTurret', 'mannedTurret', 'pdcTurret',
-        'missileRack', 'bombRack', 'utilityHardpoint', 'utilityTurret',
-        'powerPlant', 'cooler', 'shield', 'quantumDrive', 'radar',
-        'lifeSupport', 'controller', 'capacitor', 'module', 'unknown'
-    """
-    types = port.get("types", [])
-    name = port.get("portName", "").lower()
-    type_str = " ".join(str(t).lower() for t in types)
-
-    # Component types
-    if "powerplant" in type_str or "power_plant" in name:
-        return "powerPlant"
-    if "cooler" in type_str or "cooler" in name:
-        return "cooler"
-    if "shield" in type_str or "shield" in name:
-        return "shield"
-    if "quantumdrive" in type_str or "quantum" in name:
-        return "quantumDrive"
-    if "radar" in type_str or "radar" in name:
-        return "radar"
-    if "lifesupport" in type_str or "life_support" in name:
-        return "lifeSupport"
-    if "flightcontroller" in type_str or "controller" in name:
-        return "controller"
-    if "capacitor" in type_str:
-        return "capacitor"
-
-    # Weapon types
-    if "missilerack" in type_str or "missile" in type_str:
-        return "missileRack"
-    if "bomb" in type_str:
-        return "bombRack"
-    if "turret" in type_str:
-        if "pdc" in name or "point_def" in name:
-            return "pdcTurret"
-        if "remote" in name or "slaved" in name:
-            return "remoteTurret"
-        if "utility" in type_str:
-            return "utilityTurret"
-        return "mannedTurret"
-    if "weapongun" in type_str or "weapon" in type_str:
-        if "utility" in type_str:
-            return "utilityHardpoint"
-        return "pilotWeapon"
-
-    if "module" in type_str:
-        return "module"
-
-    return "unknown"
-
-
 def _elem_to_dict(elem):
     """Recursively convert an XML element to a dict."""
     result = dict(elem.attrib)

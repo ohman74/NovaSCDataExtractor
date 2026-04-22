@@ -38,6 +38,11 @@ def resolve_name(raw_name, translations):
         # Keep raw @key if resolved to empty string
         if not resolved:
             return raw_name
+        # CIG sometimes stores trailing literal '\n' / '\r' escape sequences
+        # in name strings (e.g. "Argo CSV-SM\n"). Strip them — a Name/Display
+        # field never ends with a line-break.
+        while resolved.endswith(("\\n", "\\r")):
+            resolved = resolved[:-2]
         return resolved
     return raw_name
 

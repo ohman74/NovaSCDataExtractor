@@ -13,24 +13,37 @@ _FPS_SUBTYPES = {
 }
 
 
-def _is_fps_attachment(item_type, sub_type, class_name):
-    """Check if this is an FPS weapon attachment (not a ship weapon barrel)."""
-    cn_lower = class_name.lower()
+def _is_fps_attachment(item_type, sub_type, class_name, attach_def=None):
+    """Check if this is an FPS weapon attachment (not a ship weapon barrel).
 
-    # Skip ship weapon barrels (uppercase manufacturer prefix + weapon type + Barrel)
-    # e.g. BEHR_LaserCannon_Barrel_S1, GATS_BallisticGatling_Barrel_S3
+    Structural discriminators for the WeaponAttachment.Barrel case (both
+    FPS and ship barrels share this type):
+    - FPS barrels carry the `FPS_Barrel` tag (CIG's own marker).
+    - Ship barrels carry the `uneditable` tag and no `FPS_Barrel`.
+    Templates lack either tag; handled by the placeholder-name check
+    below.
+    """
+    cn_lower = class_name.lower()
+    ad = attach_def or {}
+    tags = (ad.get("tags", "") or "")
+
+    # WeaponAttachment.Barrel is shared by FPS and ship barrels. Use the
+    # `FPS_Barrel` structural tag to discriminate (replaces the old
+    # uppercase-first-letter name check — #11 in NAME_FILTERS.md).
     if item_type == "WeaponAttachment" and sub_type == "Barrel":
-        # FPS barrels use lowercase: arma_barrel_comp_s1
-        # Ship barrels use uppercase: BEHR_LaserCannon_Barrel_S1
-        if class_name[0].isupper() and "_Barrel_" in class_name:
+        if "FPS_Barrel" in tags:
+            pass  # fall through to the FPS allow-list below
+        else:
+            # Ship barrel (uneditable) or generic template (empty tags).
             return False
 
-    # Skip generic templates
-    if cn_lower.endswith("_template") or cn_lower.startswith("wep_") and "template" in cn_lower:
-        return False
-    if class_name in ("Barrel_Attachment", "Optics_TEMPLATE", "Underbarrel_TEMPLATE",
-                       "WEP_Barrel_Template", "WEP_CannonBarrel_Template",
-                       "WEP_GatlingBarrel_Template", "WEP_RepeaterBarrel_Template"):
+    # Skip generic WeaponAttachment templates — placeholder name + no
+    # manufacturer. Light.Weapon items with the same shape are NOT
+    # templates (e.g. weapon_underbarrel_light variants), so scope this
+    # check to WeaponAttachment only.
+    if (item_type == "WeaponAttachment"
+            and ad.get("name", "") == "@LOC_PLACEHOLDER"
+            and not ad.get("manufacturerGuid", "")):
         return False
 
     if item_type == "WeaponAttachment" and sub_type in _FPS_SUBTYPES:
@@ -55,7 +68,13 @@ def _modifier_signature(record):
 
 
 def _find_base_attachment(class_name, all_records):
-    """Find base attachment by progressively stripping name segments."""
+    """Find base attachment by progressively stripping name segments.
+
+    Same rationale as `_find_base_weapon` (#10 in NAME_FILTERS.md):
+    no parent-ref signal exists in the parsed item records, so we fall
+    back to CIG's ClassName-prefix convention. Used only for signature
+    comparison — not a filter.
+    """
     parts = class_name.split("_")
     for i in range(len(parts) - 1, 1, -1):
         candidate = "_".join(parts[:i])
@@ -77,7 +96,7 @@ def build_fps_attachments(ctx):
         item_type = attach_def.get("type", "")
         sub_type = attach_def.get("subType", "")
 
-        if not _is_fps_attachment(item_type, sub_type, class_name):
+        if not _is_fps_attachment(item_type, sub_type, class_name, attach_def):
             continue
 
         all_attachments[class_name] = record

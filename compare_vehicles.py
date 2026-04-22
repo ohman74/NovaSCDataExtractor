@@ -1,24 +1,30 @@
-"""Compare output/ships.json against the reference ship metadata / stats / hardpoints files.
+"""Compare output/vehicle_{metadata,stats,hardpoints}.json against the reference.
 
 Usage:
-    py compare_ships.py              # summary of all three refs
-    py compare_ships.py <ClassName>  # deep diff for a single ship
-    py compare_ships.py --field <name> [<limit>]  # mismatches for one field
+    py compare_vehicles.py                       # summary of all three slices
+    py compare_vehicles.py <ClassName>           # deep-diff one vehicle across all slices
+    py compare_vehicles.py --field <name>        # show mismatches for one field
+
+Slices:
+    vehicle_metadata   ↔ temp/reference_data_new/entry_0.json
+    vehicle_stats      ↔ temp/reference_data_new/entry_1.json
+    vehicle_hardpoints ↔ temp/reference_data_new/entry_2.json
 
 Ignores:
 - Leading/trailing whitespace in strings
 - Float differences ≤ 0.01
-- Reference-only fields that ships.json doesn't emit (CommLink, ProgressTracker,
-  Store, PU, Buy — external/website metadata).
+- External-web placeholder fields we can't derive from the game files
+  (kept in output for shape parity, but skipped during comparison)
 """
 import json
 import sys
 from collections import Counter
 
-# Fields present in ref but we don't emit (external/website-sourced).
-_SKIP_FIELDS_E0 = {"CommLink", "ProgressTracker", "Store", "PU", "New Ship", "New Vehicle"}
-_SKIP_FIELDS_E1 = {"Buy", "New Ship", "New Vehicle"}
-_SKIP_FIELDS_E2 = set()
+# Fields we emit as empty placeholders to match reference shape but can't
+# actually fill from game data. Skip them in comparison.
+_SKIP_FIELDS_METADATA = {"CommLink", "ProgressTracker", "Store", "PU", "New Ship", "New Vehicle"}
+_SKIP_FIELDS_STATS = {"Buy", "New Ship", "New Vehicle"}
+_SKIP_FIELDS_HARDPOINTS = set()
 
 
 def eq(a, b):
@@ -43,8 +49,6 @@ def eq(a, b):
 
 
 def _field_report(ref_list, out_by_cn, skip_fields, label):
-    """Compare every ref item against our output for overlapping classNames.
-    Report per-field match counts."""
     common = [r for r in ref_list if r["ClassName"] in out_by_cn]
     all_fields = Counter()
     match_fields = Counter()
@@ -117,21 +121,24 @@ def show_field(field, ref_list, out_by_cn, label, limit=5):
             print(f"  OUT: {json.dumps(o, indent=2)[:700]}")
 
 
-def deep_diff(class_name, refs, out_by_cn):
-    out = out_by_cn.get(class_name)
-    if not out:
-        print(f"Not in ships.json: {class_name}")
-        return
-    for label, ref_list, skip_fields in refs:
+def deep_diff(class_name, slices):
+    for label, ref_list, out_by_cn, skip_fields in slices:
         ref_item = next((r for r in ref_list if r["ClassName"] == class_name), None)
-        if not ref_item:
+        out_item = out_by_cn.get(class_name)
+        if not ref_item and not out_item:
             continue
         print(f"=== {label}: {class_name} ===")
-        for k in sorted(set(ref_item.keys()) | set(out.keys())):
+        if not ref_item:
+            print("  (not in ref)")
+            continue
+        if not out_item:
+            print("  (not in out)")
+            continue
+        for k in sorted(set(ref_item.keys()) | set(out_item.keys())):
             if k in skip_fields:
                 continue
             rv = ref_item.get(k, "<missing>")
-            ov = out.get(k, "<missing>")
+            ov = out_item.get(k, "<missing>")
             if not eq(rv, ov):
                 print(f"\n[{k}]")
                 print(f"  REF: {json.dumps(rv, indent=2)[:2000]}")
@@ -139,56 +146,39 @@ def deep_diff(class_name, refs, out_by_cn):
         print()
 
 
-def load():
-    """Load ref files and merge ships.json + vehicles.json into a single lookup.
-    Ref files combine ships and vehicles, so we must too. For overlapping
-    classNames, vehicles.json fills in missing fields (e.g. IsGravlev,
-    MovementClass) while ships.json keeps everything else."""
-    with open("output/ships.json", encoding="utf-8") as f:
-        ships = json.load(f)
-    with open("output/vehicles.json", encoding="utf-8") as f:
-        vehicles = json.load(f)
-    with open("temp/reference_data_new/entry_0.json", encoding="utf-8-sig") as f:
-        e0 = json.load(f)
-    with open("temp/reference_data_new/entry_1.json", encoding="utf-8-sig") as f:
-        e1 = json.load(f)
-    with open("temp/reference_data_new/entry_2.json", encoding="utf-8-sig") as f:
-        e2 = json.load(f)
-
-    out_by_cn = {r["ClassName"]: r for r in vehicles}
-    # ships.json takes precedence for shared classNames; missing keys are filled
-    # from vehicles.json (vehicle-specific fields).
-    for r in ships:
-        cn = r["ClassName"]
-        if cn in out_by_cn:
-            merged = dict(out_by_cn[cn])
-            merged.update(r)  # ships fields win
-            out_by_cn[cn] = merged
-        else:
-            out_by_cn[cn] = r
-    return out_by_cn, e0, e1, e2
+def _load_json(path, bom=True):
+    enc = "utf-8-sig" if bom else "utf-8"
+    with open(path, encoding=enc) as f:
+        return json.load(f)
 
 
 def main():
-    out_by_cn, e0, e1, e2 = load()
-    args = sys.argv[1:]
-    refs = [
-        ("entry_0 (metadata)", e0, _SKIP_FIELDS_E0),
-        ("entry_1 (stats)",    e1, _SKIP_FIELDS_E1),
-        ("entry_2 (hardpoints)", e2, _SKIP_FIELDS_E2),
+    out_meta = {r["ClassName"]: r for r in _load_json("output/vehicle_metadata.json", bom=False)}
+    out_stats = {r["ClassName"]: r for r in _load_json("output/vehicle_stats.json", bom=False)}
+    out_hp = {r["ClassName"]: r for r in _load_json("output/vehicle_hardpoints.json", bom=False)}
+    e0 = _load_json("temp/reference_data_new/entry_0.json")
+    e1 = _load_json("temp/reference_data_new/entry_1.json")
+    e2 = _load_json("temp/reference_data_new/entry_2.json")
+
+    slices = [
+        ("entry_0 (metadata)",   e0, out_meta,  _SKIP_FIELDS_METADATA),
+        ("entry_1 (stats)",      e1, out_stats, _SKIP_FIELDS_STATS),
+        ("entry_2 (hardpoints)", e2, out_hp,    _SKIP_FIELDS_HARDPOINTS),
     ]
+
+    args = sys.argv[1:]
     if not args:
-        for label, ref_list, skip in refs:
+        for label, ref_list, out_by_cn, skip in slices:
             _field_report(ref_list, out_by_cn, skip, label)
     elif args[0] == "--field":
         field = args[1]
         limit = int(args[2]) if len(args) > 2 else 5
-        for label, ref_list, skip in refs:
+        for label, ref_list, out_by_cn, skip in slices:
             if field in skip:
                 continue
             show_field(field, ref_list, out_by_cn, label, limit=limit)
     else:
-        deep_diff(args[0], refs, out_by_cn)
+        deep_diff(args[0], slices)
 
 
 if __name__ == "__main__":

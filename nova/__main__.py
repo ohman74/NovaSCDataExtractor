@@ -24,12 +24,17 @@ from .dataforge_parser import stream_parse_dataforge
 from .entity_parser import parse_entity_file
 from .vehicle_impl_parser import parse_vehicle_implementations
 from .utils import parse_localization, resolve_name
-from .builders.ships import build_ships
-from .builders.vehicles import build_vehicles
-from .builders.ship_equipment import build_ship_equipment
-from .builders.vehicle_equipment import build_vehicle_equipment
-from .builders.fps_weapons import build_fps_weapons
-from .builders.fps_attachments import build_fps_attachments
+from .cosmetic_classifier import (
+    identify_cosmetic_variants,
+    load_impl_xml_modifications,
+)
+from .builders.slices import (
+    build_vehicle_metadata,
+    build_vehicle_stats,
+    build_vehicle_hardpoints,
+    build_vehicle_equipment,
+    build_fps_equipment,
+)
 
 
 class BuildContext:
@@ -37,7 +42,8 @@ class BuildContext:
     def __init__(self, items_by_class, vehicles_by_class, guid_to_class,
                  manufacturers, ammo_params, translations, vehicle_impls=None,
                  inventory_containers=None, gimbal_modifiers=None,
-                 weapon_pool_sizes=None, shield_pool_sizes=None):
+                 weapon_pool_sizes=None, shield_pool_sizes=None,
+                 inclusion_modes=None, cosmetic_variants=None):
         self.items = items_by_class
         self.vehicles = vehicles_by_class
         self.guids = guid_to_class
@@ -49,6 +55,15 @@ class BuildContext:
         self.gimbal_modifiers = gimbal_modifiers or {}
         self.weapon_pool_sizes = weapon_pool_sizes or {}
         self.shield_pool_sizes = shield_pool_sizes or {}
+        # className -> EAEntityDataParams.inclusionMode ("ReadyToInclude" /
+        # "DoNotInclude" / ""). Populated from per-ship entity XMLs. Used by
+        # the ships filter to drop records CIG flagged not-for-PU.
+        self.inclusion_modes = inclusion_modes or {}
+        # Set of ClassNames identified as cosmetic-only variants of another
+        # ship sharing the same vehicleDefinition. Populated by the
+        # cosmetic_classifier. The extractor filters these so each cosmetic
+        # group is represented by its base ClassName only.
+        self.cosmetic_variants = cosmetic_variants or set()
 
     def resolve_name(self, raw_name):
         return resolve_name(raw_name, self.translations)
@@ -107,12 +122,11 @@ class BuildContext:
 # Builder registry: (filename, builder_fn, uses_vehicles)
 # All builders receive BuildContext as first arg
 BUILDERS = {
-    "ships": ("ships.json", build_ships, True),
-    "vehicles": ("vehicles.json", build_vehicles, True),
-    "ship_equipment": ("ship_equipment.json", build_ship_equipment, False),
-    "vehicle_equipment": ("vehicle_equipment.json", build_vehicle_equipment, False),
-    "fps_weapons": ("fps_weapons.json", build_fps_weapons, False),
-    "fps_attachments": ("fps_attachments.json", build_fps_attachments, False),
+    "vehicle_metadata":   ("vehicle_metadata.json",   build_vehicle_metadata,   True),
+    "vehicle_stats":      ("vehicle_stats.json",      build_vehicle_stats,      True),
+    "vehicle_hardpoints": ("vehicle_hardpoints.json", build_vehicle_hardpoints, True),
+    "vehicle_equipment":  ("vehicle_equipment.json",  build_vehicle_equipment,  False),
+    "fps_equipment":      ("fps_equipment.json",      build_fps_equipment,      False),
 }
 
 
@@ -186,7 +200,7 @@ def main():
 
     # Stage 3: Get entity files (already extracted in stage 1)
     entity_files = []
-    for entity_type in ["spaceships", "ground"]:
+    for entity_type in ["spaceships", "groundvehicles"]:
         found = get_entity_files(config, entity_type)
         print(f"  Found {len(found)} {entity_type} entity files")
         entity_files.extend(found)
@@ -221,34 +235,48 @@ def main():
     entity_data_map = {}
     weapon_pool_sizes = {}  # className (lower) -> pool size
     shield_pool_sizes = {}  # className (lower) -> shield maxItemCount
+    inclusion_modes = {}    # className -> EAEntityDataParams.inclusionMode
     import re
     _POOL_RE = re.compile(r'FixedPowerPool\s+itemType="WeaponGun"\s+poolSize="(\d+)"')
     _SHIELD_POOL_RE = re.compile(r'DynamicPowerPool\s+itemType="Shield"\s+maxItemCount="(-?\d+)"')
+    _INCLUSION_RE = re.compile(
+        r'EAEntityDataParams[^>]*\binclusionMode="([^"]*)"'
+    )
+    _ROOT_TAG_RE = re.compile(r'<EntityClassDefinition\.(\w+)')
     for original, xml_file in entity_xml_map.items():
         data = parse_entity_file(xml_file)
+        parsed_cn = ""
         if data:
-            class_name = data.get("ClassName", data.get("className", ""))
-            if not class_name:
-                class_name = os.path.splitext(os.path.basename(original))[0]
-            entity_data_map[class_name] = data
-
-        # Extract pool sizes from entity XML via regex (fast)
+            parsed_cn = data.get("ClassName", data.get("className", ""))
+            if not parsed_cn:
+                parsed_cn = os.path.splitext(os.path.basename(original))[0]
+            entity_data_map[parsed_cn] = data
+        # pool sizes are keyed by lowercase filename basename (existing convention);
+        # inclusion_modes are keyed by the parsed CamelCase ClassName to match
+        # ctx.vehicles.
+        fname_cn = os.path.splitext(os.path.basename(original))[0]
         try:
             with open(xml_file, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
             m = _POOL_RE.search(content)
             if m:
-                cn = os.path.splitext(os.path.basename(original))[0]
-                weapon_pool_sizes[cn.lower()] = int(m.group(1))
+                weapon_pool_sizes[fname_cn.lower()] = int(m.group(1))
             m2 = _SHIELD_POOL_RE.search(content)
             if m2:
-                cn = os.path.splitext(os.path.basename(original))[0]
                 val = int(m2.group(1))
                 if val > 0:  # -1 means unlimited, don't emit
-                    shield_pool_sizes[cn.lower()] = val
+                    shield_pool_sizes[fname_cn.lower()] = val
+            m3 = _INCLUSION_RE.search(content)
+            if m3:
+                # The XML root is <EntityClassDefinition.<ClassName> …> —
+                # extract the CamelCase class name directly so it matches
+                # ctx.vehicles keys (not the lowercased filename).
+                mr = _ROOT_TAG_RE.search(content)
+                cn_key = mr.group(1) if mr else (parsed_cn or fname_cn)
+                inclusion_modes[cn_key] = m3.group(1)
         except Exception:
             pass
-    print(f"  Parsed {len(entity_data_map)} entity files, {len(weapon_pool_sizes)} weapon pool sizes, {len(shield_pool_sizes)} shield pool sizes")
+    print(f"  Parsed {len(entity_data_map)} entity files, {len(weapon_pool_sizes)} weapon pool sizes, {len(shield_pool_sizes)} shield pool sizes, {len(inclusion_modes)} inclusion flags")
 
     print("\n[PARSE] Loading localization...")
     translations = parse_localization(loc_path)
@@ -257,11 +285,48 @@ def main():
     print("\n[PARSE] Parsing vehicle implementations...")
     vehicle_impls = parse_vehicle_implementations(config.cache_dir)
 
+    print("\n[PARSE] Classifying cosmetic-only ship variants...")
+    # Per-ClassName path to the per-ship entity XML (already converted).
+    entity_xml_by_class = {}
+    for original, xml_file in entity_xml_map.items():
+        # entity_xml_map keys are original file paths; look up by basename
+        # (lowercased) matches the ClassName case-insensitively, but
+        # entity_data_map keys are the CamelCase ClassNames. Prefer those.
+        cn_lower = os.path.splitext(os.path.basename(original))[0].lower()
+        # Find the CamelCase ClassName matching this file stem.
+        # Use entity_data_map if it was parsed; otherwise fall back to
+        # vehicles_by_class keys.
+        matched = None
+        for cn in vehicles_by_class:
+            if cn.lower() == cn_lower:
+                matched = cn
+                break
+        if matched:
+            entity_xml_by_class[matched] = xml_file
+
+    # Parse impl-XML <Modification> blocks for rename-only detection.
+    impl_dirs = [
+        os.path.join(config.cache_dir, "Data", "Scripts", "Entities",
+                      "Vehicles", "Implementations", "Xml"),
+    ]
+    impl_modifications = load_impl_xml_modifications(impl_dirs)
+
+    cosmetic_variants = identify_cosmetic_variants(
+        vehicles_by_class, entity_xml_by_class, items_by_class, impl_modifications,
+    )
+    print(f"  Identified {len(cosmetic_variants)} cosmetic-only variants")
+    # Emit for downstream audit tools (compare_matrix) so they can recognise
+    # matrix SKUs intentionally omitted from our output as cosmetic-of-base
+    # rather than reporting them as gaps.
+    cv_path = os.path.join(config.cache_dir, "cosmetic_variants.json")
+    with open(cv_path, "w", encoding="utf-8") as f:
+        json.dump(sorted(cosmetic_variants), f, indent=2)
+
     # Build context shared by all builders
     ctx = BuildContext(items_by_class, vehicles_by_class, guid_to_class,
                        manufacturers, ammo_params, translations, vehicle_impls,
                        inventory_containers, gimbal_modifiers, weapon_pool_sizes,
-                       shield_pool_sizes)
+                       shield_pool_sizes, inclusion_modes, cosmetic_variants)
 
     # Build output
     categories = args.only if args.only else list(BUILDERS.keys())
