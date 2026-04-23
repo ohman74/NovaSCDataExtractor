@@ -443,6 +443,25 @@ def _build_armor_stats(loadout_entries, ctx):
     return result if result else None
 
 
+# Types whose BaseLoadout the reference emits without a Class field at all.
+# Verified against entry_2.json: these are predominantly controllers and
+# integrated/non-swappable mounts where no manufacturer Class applies.
+_BASELOADOUT_CLASS_OMIT_TYPES = frozenset({
+    "FlightController.UNDEFINED",
+    "WheeledController.UNDEFINED",
+    "Display.UNDEFINED",
+    "Room.UNDEFINED",
+    "ToolArm.UNDEFINED",
+    "UtilityTurret.MannedTurret",
+    "Turret.NoseMounted",
+    "TurretBase.MannedTurret",
+})
+
+
+def _omit_baseloadout_class(full_type):
+    return full_type in _BASELOADOUT_CLASS_OMIT_TYPES
+
+
 def _build_self_destruct_entry(item_record, ctx):
     """SelfDestruct uses a flat schema in the reference (no PortName/Loadout/
     BaseLoadout wrapper). Pulls Countdown/Damage/MinRadius/MaxRadius from
@@ -1537,7 +1556,7 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
                 "Countermeasures": {"InstalledItems": [], "ItemsQuantity": 0},
             },
             "Avionics": {
-                "FlightBlade": {"InstalledItems": [], "Hardpoints": 0},
+                "FlightBlade": {"InstalledItems": []},
                 "Radars": {"InstalledItems": [], "ItemsQuantity": 0},
                 "SelfDestruct": {"InstalledItems": [], "ItemsQuantity": 0},
             },
@@ -2035,14 +2054,21 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
                 bl_class = "" if ad.get("size") == 4 else "Civilian"
             else:
                 bl_class = MANUFACTURER_CLASS.get(mfr_code, "")
-        entry["BaseLoadout"] = {
+        # Reference's BaseLoadout.Class behaviour is type-specific: it
+        # consistently omits Class for FlightController, WheeledController,
+        # Display, Room, ToolArm, and a handful of controller-style turrets,
+        # but emits Class (often empty) for everything else. Mirror that
+        # by suppressing Class only for types known to omit it.
+        bl = {
             "ClassName": entity_class,
             "Name": ctx.resolve_name(ad.get("name", "")),
             "Type": full_type,
             "Size": size,
             "Grade": ad.get("grade", 0),
-            "Class": bl_class,
         }
+        if not _omit_baseloadout_class(full_type):
+            bl["Class"] = bl_class
+        entry["BaseLoadout"] = bl
         # Types: from port definition (vehicle impl) if available, otherwise
         # build from item type + child port types for comprehensive listing
         if port_def and port_def.get("types"):
@@ -2059,11 +2085,10 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
                         types.append(pt)
             entry["Types"] = types
 
-        # Flags from port definition
+        # Flags from port definition. Reference preserves "uneditable" in
+        # the Flags list AND sets the Uneditable field; mirror both.
         if port_def and port_def.get("flags"):
-            flag_list = [f for f in port_def["flags"] if f != "uneditable"]
-            if flag_list:
-                entry["Flags"] = flag_list
+            entry["Flags"] = list(port_def["flags"])
 
         if "gimbal" in entity_class.lower() or "turret" in full_type.lower():
             entry["Gimballed"] = True
@@ -2118,7 +2143,8 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
         # the className; reference would have a GUID but we lack the lookup.
         entry["Loadout"] = entity_class
 
-    entry["Uneditable"] = False
+    # Uneditable mirrors the impl-XML port "uneditable" flag.
+    entry["Uneditable"] = bool(port_def and port_def.get("uneditable"))
     return entry
 
 
