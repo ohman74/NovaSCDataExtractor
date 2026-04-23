@@ -443,6 +443,36 @@ def _build_armor_stats(loadout_entries, ctx):
     return result if result else None
 
 
+def _build_self_destruct_entry(item_record, ctx):
+    """SelfDestruct uses a flat schema in the reference (no PortName/Loadout/
+    BaseLoadout wrapper). Pulls Countdown/Damage/MinRadius/MaxRadius from
+    SSCItemSelfDestructComponentParams on the equipped item.
+    """
+    if not item_record:
+        return None
+    comps = item_record.get("components", {})
+    sd = comps.get("SSCItemSelfDestructComponentParams", {})
+    if not isinstance(sd, dict) or not sd:
+        return None
+    ad = item_record.get("attachDef", {})
+    name = ctx.resolve_name(ad.get("localization", {}).get("name", "")) if ad else ""
+    if not name:
+        # Fall back to item name; reference uses the localized display name.
+        name = item_record.get("displayName") or ad.get("Name") or ""
+    physics = comps.get("physics", {})
+    return {
+        "Name": name or "Self Destruct Unit",
+        "Size": ad.get("size", 0),
+        "Mass": float(physics.get("mass", 0)),
+        "Grade": ad.get("grade", 0),
+        "Uneditable": True,
+        "Countdown": safe_float(sd.get("time", "0")),
+        "Damage": safe_float(sd.get("damage", "0")),
+        "MinRadius": safe_float(sd.get("minRadius", "0")),
+        "MaxRadius": safe_float(sd.get("radius", "0")),
+    }
+
+
 def _build_steer_chars(pw):
     """SteerCharacteristics from <PhysicalWheeled> attributes.
 
@@ -1559,6 +1589,10 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
         elif category == "Storage":
             hp = _build_storage_entry(port_name, entity_class, item_record, ctx)
             _place(tree, category, hp)
+        elif category == "SelfDestruct":
+            hp = _build_self_destruct_entry(item_record, ctx)
+            if hp:
+                _place(tree, category, hp)
         else:
             hp = _build_standard_entry(port_name, entity_class, item_record, children, ctx, port_def)
             _place(tree, category, hp)
@@ -1644,11 +1678,39 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
     # Loadout convention: Weapons.* uses GUID, Components.* uses className.
     # _build_standard_entry defaults to GUID; rewrite Components subtree.
     _rewrite_loadout_to_classname(tree.get("Components"), ctx)
+    # Missiles and bombs (the consumable inside racks) also use className.
+    # Walk Weapons.{MissileRacks,BombRacks} and rewrite leaf Loadouts whose
+    # BaseLoadout.Type starts with "Missile" or "Bomb".
+    _rewrite_missile_bomb_loadouts(tree.get("Weapons"), ctx)
 
     return tree
 
 
 _GUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _rewrite_missile_bomb_loadouts(node, ctx):
+    """Rewrite Loadout to className for missile/bomb leaves under Weapons.
+
+    Mounts and racks themselves keep their GUID; only the consumable item
+    living inside (BaseLoadout.Type starts with "Missile" or "Bomb")
+    switches to className. Reference convention.
+    """
+    if isinstance(node, dict):
+        bl = node.get("BaseLoadout")
+        if (isinstance(bl, dict)
+                and isinstance(bl.get("Type"), str)
+                and (bl["Type"].startswith("Missile") or bl["Type"].startswith("Bomb"))
+                and isinstance(node.get("Loadout"), str)
+                and _GUID_RE.match(node["Loadout"])):
+            resolved = ctx.resolve_guid(node["Loadout"])
+            if resolved:
+                node["Loadout"] = resolved
+        for v in node.values():
+            _rewrite_missile_bomb_loadouts(v, ctx)
+    elif isinstance(node, list):
+        for v in node:
+            _rewrite_missile_bomb_loadouts(v, ctx)
 
 
 def _rewrite_loadout_to_classname(node, ctx):
