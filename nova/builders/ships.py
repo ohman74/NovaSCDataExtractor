@@ -306,10 +306,15 @@ def _build_ship(class_name, record, ctx):
     if flight:
         ship["FlightCharacteristics"] = flight
 
-    # FuelManagement from fuel tanks, intakes, and thrusters
-    fuel = _build_fuel_management(default_loadout, ctx)
-    if fuel:
-        ship["FuelManagement"] = fuel
+    # FuelManagement from fuel tanks, intakes, and thrusters.
+    # Wheeled/tracked ground vehicles use a different fuel system; reference
+    # omits FuelManagement on them. Gravlev hoverbikes (Dragonfly, Nox, etc.)
+    # do report FuelManagement in the reference, so keep emitting for those.
+    is_pure_ground = _is_ground_vehicle(vehicle) and not vehicle.get("isGravlevVehicle", False)
+    if not is_pure_ground:
+        fuel = _build_fuel_management(default_loadout, ctx)
+        if fuel:
+            ship["FuelManagement"] = fuel
 
     # Emissions (CrossSection from vehicle entity)
     emissions = _build_emissions(record)

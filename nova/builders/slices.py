@@ -83,8 +83,6 @@ def to_metadata(record):
     out["ProgressTracker"] = _empty_progress_tracker()
     out["Store"] = _empty_store()
     out["PU"] = _empty_pu()
-    out["New Ship"] = None
-    out["New Vehicle"] = None
     return out
 
 
@@ -94,9 +92,10 @@ def to_stats(record):
     iv = _derive_is_vehicle(record)
     if iv:
         out["IsVehicle"] = True
-    out["Buy"] = {}
-    out["New Ship"] = None
-    out["New Vehicle"] = None
+    # Buy is reference-only — populated externally when shop data is known.
+    # Reference omits the field entirely when no shops sell the ship; emitting
+    # an empty dict for every record adds noise. Keep the reservation here so
+    # future shop integration can fill it; for now omit entirely.
     return out
 
 
