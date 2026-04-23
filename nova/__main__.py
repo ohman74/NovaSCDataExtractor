@@ -184,11 +184,27 @@ def main():
         sys.exit(1)
 
     # Get game version
-    game_version = config.get_game_version()
-    print(f"\nGame version: {game_version}")
+    version_info = config.get_version_info()
+    game_version = version_info["branch"]
+    version_label = version_info["version"] or "unknown"
+    print(f"\nGame branch:   {game_version}")
+    print(f"Build version: {version_label}")
+    if version_info["p4_change"]:
+        print(f"P4 changelist: {version_info['p4_change']}")
     print(f"Data.p4k: {config.p4k_path}")
     p4k_size = os.path.getsize(config.p4k_path) / (1024 * 1024 * 1024)
     print(f"Data.p4k size: {p4k_size:.1f} GB")
+
+    # Staleness check: cache extracted from a different p4k than the one on disk
+    staleness = config.is_cache_stale()
+    if staleness["stale"] and not args.force:
+        from datetime import datetime
+        c_mtime = datetime.fromtimestamp(staleness["cache_mtime"]).strftime("%Y-%m-%d %H:%M")
+        p_mtime = datetime.fromtimestamp(staleness["p4k_mtime"]).strftime("%Y-%m-%d %H:%M")
+        print(f"\n[WARN] Cache is older than Data.p4k (cache {c_mtime} vs p4k {p_mtime}).")
+        print("       Reported gameVersion reflects the current Live manifest, but the")
+        print("       extracted data is from the previous p4k contents. Re-run with")
+        print("       --force to invalidate the cache and extract from current p4k.")
 
     start_time = time.time()
 
@@ -347,6 +363,9 @@ def main():
     # Write metadata
     metadata = {
         "gameVersion": game_version,
+        "buildVersion": version_info["version"],
+        "p4Change": version_info["p4_change"],
+        "buildDate": version_info["build_date"],
         "channel": os.path.basename(config.sc_live_path),
         "extractionTimestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "novaVersion": __version__,

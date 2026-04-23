@@ -35,20 +35,45 @@ class Config:
         return errors
 
     def get_game_version(self):
+        return self.get_version_info().get("branch", "unknown")
+
+    def get_version_info(self):
+        """Full build manifest snapshot: branch, build version, p4 change, build date.
+
+        Branch alone (e.g. "sc-alpha-4.7.0") is ambiguous — PTU and Live often share
+        the same branch string while pointing at completely different p4 changelists.
+        The "Version" field (e.g. "4.7.178.8917") is the unambiguous build identifier.
+        """
+        info = {"branch": "unknown", "version": None, "p4_change": None, "build_date": None}
         manifest_path = os.path.join(self.sc_live_path, "build_manifest.id")
-        if os.path.isfile(manifest_path):
+        if not os.path.isfile(manifest_path):
+            return info
+        try:
             with open(manifest_path, "r") as f:
-                content = f.read().strip()
-            for line in content.splitlines():
-                if '"RequestedP4kVersion"' in line:
-                    parts = line.split('"')
-                    if len(parts) >= 4:
-                        return parts[3]
-                if '"Branch"' in line:
-                    parts = line.split('"')
-                    if len(parts) >= 4:
-                        return parts[3]
-        return "unknown"
+                manifest = json.load(f).get("Data", {})
+            info["branch"] = manifest.get("Branch") or info["branch"]
+            info["version"] = manifest.get("Version") or None
+            info["p4_change"] = manifest.get("RequestedP4ChangeNum") or None
+            info["build_date"] = manifest.get("BuildDateStamp") or None
+        except (json.JSONDecodeError, OSError):
+            pass
+        return info
+
+    def is_cache_stale(self):
+        """Check whether the cached Game2.xml is older than the live Data.p4k.
+
+        Returns a dict with `stale` (bool), `cache_mtime`, `p4k_mtime`. When
+        `stale=True` the cache was extracted from a different p4k than the
+        one currently on disk and should be invalidated with --force.
+        """
+        cache_xml = os.path.join(self.cache_dir, "Data", "Game2.xml")
+        result = {"stale": False, "cache_mtime": None, "p4k_mtime": None}
+        if not os.path.isfile(cache_xml) or not os.path.isfile(self.p4k_path):
+            return result
+        result["cache_mtime"] = os.path.getmtime(cache_xml)
+        result["p4k_mtime"] = os.path.getmtime(self.p4k_path)
+        result["stale"] = result["cache_mtime"] < result["p4k_mtime"]
+        return result
 
     def ensure_dirs(self):
         os.makedirs(self.tools_dir, exist_ok=True)
