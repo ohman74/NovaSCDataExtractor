@@ -75,7 +75,47 @@ def _parse_vehicle_xml(filepath):
             # Hull HP: structural part damageMax values + thruster HP
             result["hullHP"] = _collect_hull_hp(main_part)
 
+    # Wheeled / tracked ground-vehicle dynamics (PhysicalWheeled or PhysicalTracked).
+    # Used for SteerCharacteristics + TrackSteerCharacteristics + TrackWheeledCharacteristics.
+    physics = _collect_ground_vehicle_dynamics(root)
+    if physics:
+        result["groundDynamics"] = physics
+
     return result
+
+
+def _collect_ground_vehicle_dynamics(root):
+    """Extract ground-vehicle steer/drive/track params from impl XML.
+
+    Looks for <PhysicalWheeled> (wheeled cars/buggies) and <PhysicalTracked>
+    (tank-style tracked vehicles like the Tumbril Storm). Tracked vehicles
+    additionally provide <Engine> drive params under TrackWheeledCharacteristics
+    in the reference; the engine block lives at the root level.
+    """
+    out = {}
+    for elem in root.iter():
+        if elem.tag == "PhysicalWheeled":
+            out["physicalWheeled"] = dict(elem.attrib)
+        elif elem.tag == "ArcadeWheeled":
+            # Arcade-physics wheeled vehicles (DRAK_Mule, etc.) — same steer
+            # attribute names as PhysicalWheeled, no separate Engine element.
+            out["physicalWheeled"] = dict(elem.attrib)
+        elif elem.tag == "TrackWheeled":
+            # Tank/tracked vehicles (Tumbril Storm, Nova) — single element
+            # carries both steer params and engine params on the same node.
+            out["trackWheeled"] = dict(elem.attrib)
+        elif elem.tag == "Engine":
+            # Multiple Engine elements may exist (e.g. one per wheel group); take
+            # the first non-empty one.
+            if "engine" not in out and elem.attrib:
+                out["engine"] = dict(elem.attrib)
+        elif elem.tag == "Power" and elem.attrib:
+            # Arcade-physics vehicles (DRAK_Mule, etc.) put acceleration /
+            # topSpeed / reverseSpeed on a <Power> element rather than
+            # <Engine>. Capture the first one we see.
+            if "power" not in out:
+                out["power"] = dict(elem.attrib)
+    return out if out else None
 
 
 def _sum_structural_mass(elem):

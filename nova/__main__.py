@@ -254,6 +254,10 @@ def main():
     inclusion_modes = {}    # className -> EAEntityDataParams.inclusionMode
     import re
     _POOL_RE = re.compile(r'FixedPowerPool\s+itemType="WeaponGun"\s+poolSize="(\d+)"')
+    # Vehicles with a DynamicPowerPool for WeaponGun (no fixed cap) still
+    # surface as ResourceNetwork.ItemPools.WeaponPoolSize=0 in the reference.
+    # Capture them too so the field is emitted with a 0 value rather than absent.
+    _DYN_POOL_RE = re.compile(r'DynamicPowerPool\s+itemType="WeaponGun"\s+maxItemCount="(-?\d+)"')
     _SHIELD_POOL_RE = re.compile(r'DynamicPowerPool\s+itemType="Shield"\s+maxItemCount="(-?\d+)"')
     _INCLUSION_RE = re.compile(
         r'EAEntityDataParams[^>]*\binclusionMode="([^"]*)"'
@@ -277,6 +281,9 @@ def main():
             m = _POOL_RE.search(content)
             if m:
                 weapon_pool_sizes[fname_cn.lower()] = int(m.group(1))
+            elif _DYN_POOL_RE.search(content):
+                # DynamicPowerPool present → no fixed cap. Reference emits 0.
+                weapon_pool_sizes.setdefault(fname_cn.lower(), 0)
             m2 = _SHIELD_POOL_RE.search(content)
             if m2:
                 val = int(m2.group(1))

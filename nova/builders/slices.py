@@ -25,6 +25,9 @@ _STATS_FIELDS = [
     "IsSpaceship", "IsVehicle", "IsGravlev",
     "Armor", "Hull", "Emissions", "ResourceNetwork", "BaseLoadout",
     "Insurance", "FlightCharacteristics", "FuelManagement",
+    # Ground-vehicle dynamics (wheeled + tracked). Absent on spaceships.
+    "SteerCharacteristics", "DriveCharacteristics",
+    "TrackSteerCharacteristics", "TrackWheeledCharacteristics",
 ]
 _HARDPOINTS_FIELDS = ["ClassName", "Name", "IsSpaceship", "IsVehicle", "IsGravlev", "PortTags", "Hull", "Hardpoints"]
 

@@ -316,6 +316,18 @@ def _build_ship(class_name, record, ctx):
         if fuel:
             ship["FuelManagement"] = fuel
 
+    # Ground vehicle dynamics (Steer/Drive/Track) from impl XML
+    if impl and impl.get("groundDynamics"):
+        gd = impl["groundDynamics"]
+        if "physicalWheeled" in gd:
+            ship["SteerCharacteristics"] = _build_steer_chars(gd["physicalWheeled"])
+            ship["DriveCharacteristics"] = _build_drive_chars(gd.get("power"))
+        if "trackWheeled" in gd:
+            # Tank/tracked vehicles: one <TrackWheeled> element carries both
+            # steering and engine fields, so we feed it to both helpers.
+            ship["TrackSteerCharacteristics"] = _build_track_steer_chars(gd["trackWheeled"])
+            ship["TrackWheeledCharacteristics"] = _build_track_wheeled_chars(gd["trackWheeled"])
+
     # Emissions (CrossSection from vehicle entity)
     emissions = _build_emissions(record)
     if emissions:
@@ -427,6 +439,93 @@ def _build_armor_stats(loadout_entries, ctx):
         }
 
     return result if result else None
+
+
+def _build_steer_chars(pw):
+    """SteerCharacteristics from <PhysicalWheeled> attributes.
+
+    Reference key naming differs from the raw XML attribute naming. Mapping
+    confirmed against ANVL_Ballista, ANVL_Centurion (V0SteerSpeed=100 maps
+    to steerSpeedMin, etc.).
+    """
+    f = lambda k: safe_float(pw.get(k, "0"))
+    return {
+        "V0SteerSpeed": f("steerSpeedMin"),
+        "VMaxSteerSpeed": f("steerSpeed"),
+        "V0SteerMaxAngle": f("v0SteerMax"),
+        "SteerSubtractV": f("vMaxSteerMax"),
+        "SteerSubtractAngle": f("kvSteerMax"),
+        "SteerRelaxationSpeed": f("steerRelaxation"),
+    }
+
+
+def _build_drive_chars(power):
+    """DriveCharacteristics from <Power> attributes (arcade vehicles).
+
+    Source verified on DRAK_Mule:
+      Power.acceleration=8 → Acceleration
+      Power.decceleration=12 → Decceleration  (typo preserved by reference)
+      Power.topSpeed=32 → TopSpeed
+      Power.reverseSpeed=7 → ReverseSpeed
+
+    PhysicalWheeled vehicles (Ballista, Centurion) have no <Power> element;
+    reference still emits zeros for them, so we do the same when power is
+    absent.
+    """
+    if not power:
+        return {"Acceleration": 0.0, "Decceleration": 0.0,
+                "TopSpeed": 0.0, "ReverseSpeed": 0.0}
+    f = lambda k: safe_float(power.get(k, "0"))
+    return {
+        "Acceleration": f("acceleration"),
+        "Decceleration": f("decceleration"),
+        "TopSpeed": f("topSpeed"),
+        "ReverseSpeed": f("reverseSpeed"),
+    }
+
+
+def _build_track_steer_chars(pt):
+    """TrackSteerCharacteristics from <PhysicalTracked>. Superset of
+    SteerCharacteristics — reference duplicates the raw fields alongside the
+    canonical-named ones."""
+    f = lambda k: safe_float(pt.get(k, "0"))
+    steer_speed = f("steerSpeed")
+    steer_speed_min = f("steerSpeedMin")
+    v0 = f("v0SteerMax")
+    vmax = f("vMaxSteerMax")
+    kv = f("kvSteerMax")
+    return {
+        "SteerSpeed": steer_speed,
+        "SteerSpeedMin": steer_speed_min,
+        "V0SteerMax": v0,
+        "KvSteerMax": kv,
+        "VMaxSteerMax": vmax,
+        "VMaxSteerSpeed": steer_speed,
+        "V0SteerSpeed": steer_speed_min,
+        "V0SteerMaxAngle": v0,
+        "SteerSubtractAngle": kv,
+        "SteerSubtractV": vmax,
+        "SteerRelaxationSpeed": f("steerRelaxation"),
+    }
+
+
+def _build_track_wheeled_chars(tw):
+    """TrackWheeledCharacteristics from <TrackWheeled> on tank/tracked vehicles.
+
+    Source confirmed against TMBL_Storm (enginePower=4700, maxSpeed=30) and
+    TMBL_Nova (enginePower=1750, maxSpeed=25). All five fields come from
+    the same <TrackWheeled> element using its native attribute names.
+    """
+    if not tw:
+        return None
+    f = lambda k: safe_float(tw.get(k, "0"))
+    return {
+        "EnginePower": f("enginePower"),
+        "EngineMinRPM": f("engineMinRPM"),
+        "EngineIdleRPM": f("engineIdleRPM"),
+        "EngineMaxRPM": f("engineMaxRPM"),
+        "MaxSpeed": f("maxSpeed"),
+    }
 
 
 def _build_emissions(record):
@@ -874,10 +973,16 @@ def _build_fuel_management(loadout_entries, ctx):
 
 
 def _build_ship_resource_network(class_name, ctx):
-    """Build ship-level ResourceNetwork (weapon pool size from entity XML)."""
-    pool_size = ctx.weapon_pool_sizes.get(class_name.lower(), 0)
-    if pool_size:
-        return {"ItemPools": {"WeaponPoolSize": float(pool_size)}}
+    """Build ship-level ResourceNetwork (weapon pool size from entity XML).
+
+    Emits even when WeaponPoolSize is 0 if the ship's entity XML actually
+    declared a FixedPowerPool (entry exists in the parsed map). Reference
+    behaviour: the Cyclone ground vehicles have explicit pool=0 records,
+    so absence vs zero is meaningful.
+    """
+    cn_lower = class_name.lower()
+    if cn_lower in ctx.weapon_pool_sizes:
+        return {"ItemPools": {"WeaponPoolSize": float(ctx.weapon_pool_sizes[cn_lower])}}
     return None
 
 
