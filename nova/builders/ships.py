@@ -1,5 +1,7 @@
 """Build ship data JSON with hardpoints, stats, and default loadout."""
 
+import re
+
 from ..utils import safe_float, safe_int, resolve_name
 from ..vehicle_impl_parser import get_vehicle_impl_data
 
@@ -1452,10 +1454,22 @@ def _empty_category():
 
 def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=None, class_name=""):
     """Build the structured Hardpoints tree matching the reference format."""
-    # Build port lookup from vehicle impl for minSize/maxSize/types
+    # Build port lookup from vehicle impl for minSize/maxSize/types.
+    # Also capture the impl's structural port order; reference sorts InstalledItems
+    # by impl XML order rather than defaultLoadout order.
     port_defs = {}
+    port_order = {}
     if impl_ports:
-        _index_ports(impl_ports, port_defs)
+        _index_ports(impl_ports, port_defs, port_order)
+
+    if port_order:
+        # Sort loadout entries by their impl-XML position. Entries with no impl
+        # port (rare — usually fully synthesised loadout-only ports) stay
+        # appended after the impl-defined ones, in their original order.
+        loadout_entries = sorted(
+            loadout_entries,
+            key=lambda e: port_order.get(e.get("portName", ""), len(port_order) + 1),
+        )
 
     tree = {
         "Weapons": {
@@ -1627,7 +1641,36 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
     # Collapse empty weapon categories to {} to match ref
     _collapse_empty_categories(tree)
 
+    # Loadout convention: Weapons.* uses GUID, Components.* uses className.
+    # _build_standard_entry defaults to GUID; rewrite Components subtree.
+    _rewrite_loadout_to_classname(tree.get("Components"), ctx)
+
     return tree
+
+
+_GUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _rewrite_loadout_to_classname(node, ctx):
+    """Recursively replace Loadout GUIDs with className under a subtree.
+
+    Reference convention: Components.* (PowerPlants, Shields, FlightBlade,
+    Radars, etc.) carry className in Loadout, while Weapons.* carries GUID.
+    Our _build_standard_entry always emits the GUID, so for the Components
+    subtree we resolve back to className.
+    """
+    if isinstance(node, dict):
+        if "Loadout" in node and isinstance(node["Loadout"], str):
+            v = node["Loadout"]
+            if _GUID_RE.match(v):
+                resolved = ctx.resolve_guid(v)
+                if resolved:
+                    node["Loadout"] = resolved
+        for v in node.values():
+            _rewrite_loadout_to_classname(v, ctx)
+    elif isinstance(node, list):
+        for v in node:
+            _rewrite_loadout_to_classname(v, ctx)
 
 
 def _enrich_controllers(tree, loadout_entries, ctx, class_name):
@@ -1838,16 +1881,23 @@ def _add_impl_only_ports(tree, impl_ports, loadout_port_names):
                     _place(tree, category, hp)
 
 
-def _index_ports(impl_ports, port_defs):
-    """Build a flat lookup of port name -> port definition from vehicle impl ports."""
+def _index_ports(impl_ports, port_defs, order_index=None, _depth=0):
+    """Build a flat lookup of port name -> port definition from vehicle impl ports.
+
+    If `order_index` is provided, also records each port's discovery order so
+    callers can sort loadout entries to match the impl XML's structural order
+    (which is what the SPViewer reference uses).
+    """
     for port in impl_ports:
         name = port.get("name", "")
         if name:
             port_defs[name] = port
+            if order_index is not None and name not in order_index:
+                order_index[name] = len(order_index)
         # Recurse into sub-ports
         sub = port.get("subPorts", [])
         if sub:
-            _index_ports(sub, port_defs)
+            _index_ports(sub, port_defs, order_index, _depth + 1)
 
 
 def _compute_mass(loadout_entries, ctx):
@@ -1909,7 +1959,8 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
             entry["MaxSize"] = size
         # Loadout uses the entity's GUID (ref convention for ship hardpoints),
         # not the className. Fall back to className if GUID unavailable.
-        entry["Loadout"] = entity_class
+        item_guid = item_record.get("guid", "") if item_record else ""
+        entry["Loadout"] = item_guid or entity_class
         # BaseLoadout.Class: look up via manufacturer class map (matches stditem.py)
         from .stditem import MANUFACTURER_CLASS, _COMPONENT_TYPES_CLASSED
         base_type = full_type.split(".")[0] if full_type else ""
@@ -2001,6 +2052,8 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
                 entry["Ports"] = sub_items
 
     elif entity_class:
+        # Fallback path when no item record was resolved — best we can do is
+        # the className; reference would have a GUID but we lack the lookup.
         entry["Loadout"] = entity_class
 
     entry["Uneditable"] = False
