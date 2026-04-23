@@ -462,6 +462,72 @@ def _omit_baseloadout_class(full_type):
     return full_type in _BASELOADOUT_CLASS_OMIT_TYPES
 
 
+def _build_cargo_grid_items(class_name, ctx):
+    """Find CargoGrid items belonging to this ship and emit reference shape.
+
+    Items follow the naming convention "<VehicleClassName>_CargoGrid_*" and
+    carry an SCItemInventoryContainerComponentParams pointing at an
+    InventoryContainer record. The reference computes:
+      Capacity = inventory.capacity
+      GridProperties.Width  = floor(interiorDimensions.x / 1.25)
+      GridProperties.Depth  = floor(interiorDimensions.y / 1.25)
+      GridProperties.Height = floor(interiorDimensions.z / 1.25)
+    plus MinContainerSize / MaxContainerSize from the min/maxPermittedItemSize
+    fields, divided by 1.25.
+    """
+    prefix = class_name + "_CargoGrid"
+    out = []
+    for cn, item in ctx.items.items():
+        if not cn.startswith(prefix):
+            continue
+        ad = item.get("attachDef", {})
+        if ad.get("type") != "CargoGrid":
+            continue
+        comps = item.get("components", {})
+        inv_comp = comps.get("SCItemInventoryContainerComponentParams", {})
+        guid = inv_comp.get("containerParams", "") if isinstance(inv_comp, dict) else ""
+        inv = ctx.inventory_containers.get(guid) if guid else None
+        if not inv:
+            continue
+
+        def _grid_dims(d):
+            if not isinstance(d, dict):
+                return None
+            return {
+                "Width": float(int(safe_float(d.get("x", 0)) / 1.25)),
+                "Height": float(int(safe_float(d.get("z", 0)) / 1.25)),
+                "Depth": float(int(safe_float(d.get("y", 0)) / 1.25)),
+            }
+        def _container_size(d):
+            dims = _grid_dims(d)
+            if not dims:
+                return None
+            cap = float(dims["Width"] * dims["Height"] * dims["Depth"])
+            return {"Capacity": cap, **dims}
+
+        interior = inv.get("interiorDimensions") or {}
+        grid_dims = _grid_dims(interior) or {"Width": 0, "Height": 0, "Depth": 0}
+        grid_props = dict(grid_dims)
+        min_size = _container_size(inv.get("minPermittedItemSize"))
+        max_size = _container_size(inv.get("maxPermittedItemSize"))
+        if min_size:
+            grid_props["MinContainerSize"] = min_size
+        if max_size:
+            grid_props["MaxContainerSize"] = max_size
+
+        out.append({
+            "Name": cn,
+            "Mass": float((comps.get("physics") or {}).get("mass", 0)),
+            "Size": ad.get("size", 0),
+            "Grade": ad.get("grade", 0),
+            "Capacity": float(inv.get("capacity", 0)),
+            "GridProperties": grid_props,
+            "Uneditable": True,
+        })
+    out.sort(key=lambda x: x["Name"])
+    return out
+
+
 def _build_self_destruct_entry(item_record, ctx):
     """SelfDestruct uses a flat schema in the reference (no PortName/Loadout/
     BaseLoadout wrapper). Pulls Countdown/Damage/MinRadius/MaxRadius from
@@ -1561,7 +1627,7 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
                 "SelfDestruct": {"InstalledItems": [], "ItemsQuantity": 0},
             },
             "Modules": _empty_category(),
-            "CargoGrids": {"ItemsQuantity": 0},
+            "CargoGrids": {"InstalledItems": [], "ItemsQuantity": 0},
             "CargoContainers": {"ItemsQuantity": 0},
             "Storage": {"InstalledItems": [], "ItemsQuantity": 0},
             "WeaponsRacks": {"InstalledItems": [], "ItemsQuantity": 0},
@@ -1687,6 +1753,15 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
         if isinstance(block, dict):
             total = sum(float(it.get("Capacity", 0) or 0) for it in block.get("InstalledItems", []))
             block[total_field] = total
+
+    # CargoGrids: pull from CargoGrid items whose className starts with the
+    # ship's class name (e.g. AEGS_Hammerhead_CargoGrid_Main belongs to
+    # AEGS_Hammerhead). Reference inlines Capacity + grid dimensions
+    # computed from the inventory container's interiorDimensions.
+    if class_name:
+        cargo_grid_items = _build_cargo_grid_items(class_name, ctx)
+        if cargo_grid_items:
+            tree["Components"]["CargoGrids"]["InstalledItems"] = cargo_grid_items
 
     # Update counts
     _update_counts(tree)
