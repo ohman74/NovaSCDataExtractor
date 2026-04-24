@@ -1349,7 +1349,7 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
     # Weapon-rack ports use a Door mechanism (opens to reveal the rack), so
     # the port's type is Door even though the hardpoint is a rack. Check the
     # port name first so these don't get skipped by the Door rule below.
-    if "weapon_rack" in pn:
+    if "weapon_rack" in pn or "weaponlocker" in pn or "weapon_locker" in pn:
         return "WeaponsRacks"
 
     # ── Structural skip: port types that never carry a gameplay hardpoint. ──
