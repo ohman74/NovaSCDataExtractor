@@ -1403,6 +1403,12 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
         # Point Defense (PDC) turrets — small autonomous turrets on capitals.
         if "pdc" in pn or "point_defense" in pn:
             return "PDCTurrets"
+        # Pilot-controlled mounts carry defaultWeaponGroup on the impl port
+        # (assigns the mount to a fire group). Hornet's class-4 center/nose
+        # and Mustang's weapon_nose are typed Turret.BallTurret but have a
+        # defaultWeaponGroup, so reference classes them as PilotWeapons.
+        if port_def.get("defaultWeaponGroup") is not None:
+            return "PilotWeapons"
         return "Turrets"
     # UtilityTurret (e.g. Cyclone mining cab). Falls after Turret since it
     # currently lands in MiningHardpoints by port name convention.
@@ -1761,7 +1767,8 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
             _place(tree, category, hp)
         elif category == "Storage":
             hp = _build_storage_entry(port_name, entity_class, item_record, ctx)
-            _place(tree, category, hp)
+            if hp:
+                _place(tree, category, hp)
         elif category == "SelfDestruct":
             hp = _build_self_destruct_entry(item_record, ctx)
             if hp:
@@ -2122,13 +2129,17 @@ def _compute_storage(loadout_entries, ctx):
 
 
 def _add_impl_only_ports(tree, impl_ports, loadout_port_names):
-    """Add ports from vehicle impl that aren't in the loadout (storage, paints, etc.)."""
+    """Add ports from vehicle impl that aren't in the loadout (paints, etc.).
+
+    Storage slots with no loadout entry are unequipped mount points rather
+    than real cargo; reference omits them. Only Paints carry through.
+    """
     for port in impl_ports:
         pname = port.get("name", "")
         if pname and pname not in loadout_port_names:
             item_type = port["types"][0] if port.get("types") else ""
             category = _classify_port(pname, item_type, port)
-            if category and category in ("Paints", "Storage"):
+            if category == "Paints":
                 hp = {"PortName": pname, "Uneditable": port.get("uneditable", False),
                       "MinSize": port.get("minSize", 0), "MaxSize": port.get("maxSize", 0),
                       "Types": port.get("types", [])}
@@ -2139,7 +2150,7 @@ def _add_impl_only_ports(tree, impl_ports, loadout_port_names):
             if sub_name and sub_name not in loadout_port_names:
                 item_type = sub["types"][0] if sub.get("types") else ""
                 category = _classify_port(sub_name, item_type, sub)
-                if category and category in ("Paints", "Storage"):
+                if category == "Paints":
                     hp = {"PortName": sub_name, "Uneditable": sub.get("uneditable", False),
                           "MinSize": sub.get("minSize", 0), "MaxSize": sub.get("maxSize", 0),
                           "Types": sub.get("types", [])}
@@ -2311,12 +2322,11 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
                 entry["RequiredTags"] = [f"${t}" if not t.startswith("$") else t
                                          for t in rt.split()]
 
-        # RequiredTags from item AttachDef (if not from port_def)
-        if "RequiredTags" not in entry:
-            req_str = ad.get("requiredTags", "")
-            if req_str:
-                entry["RequiredTags"] = [f"${t}" if not t.startswith("$") else t
-                                         for t in req_str.split()]
+        # RequiredTags are taken only from the port's requiredPortTags.
+        # The installed item's AttachDef.requiredTags describes what the item
+        # WANTS mounted on (e.g. "$AEGS_Idris_Nose") — not what the port
+        # requires of its installed item. Reference never pulls those through
+        # to the hardpoint entry.
 
         # Build sub-ports from children
         # Sub-port Tags come from THIS item's AttachDef tags (the parent),
@@ -2402,8 +2412,14 @@ def _build_thruster_entry(port_name, entity_class, item_record, ctx):
 
 def _build_cm_entry(port_name, entity_class, item_record, ctx):
     """Build a countermeasure entry."""
+    # Bespoke countermeasure items (e.g. AEGS_Firebird_CML_Flare) often have
+    # an unresolved @LOC_PLACEHOLDER name. Reference falls back to the
+    # className in that case rather than emitting the placeholder marker.
+    name = ctx.resolve_name(item_record.get("attachDef", {}).get("name", "")) if item_record else port_name
+    if "PLACEHOLDER" in name and entity_class:
+        name = entity_class
     entry = {
-        "Name": ctx.resolve_name(item_record.get("attachDef", {}).get("name", "")) if item_record else port_name,
+        "Name": name,
         "Uneditable": True,
     }
 
@@ -2421,7 +2437,8 @@ def _build_cm_entry(port_name, entity_class, item_record, ctx):
         # Ammo data for countermeasure
         ammo_comp = comps.get("ammo", {})
         if ammo_comp:
-            entry["Ammunition"] = ammo_comp.get("maxAmmoCount", 0)
+            # Reference emits Ammunition as float (48.0 not 48).
+            entry["Ammunition"] = float(ammo_comp.get("maxAmmoCount", 0))
             ammo_data = ctx.get_ammo(ammo_comp.get("ammoParamsRecord", ""))
             if ammo_data:
                 entry["Speed"] = ammo_data.get("speed", 0)
@@ -2486,20 +2503,32 @@ def _build_simple_entry(port_name, entity_class, item_record, ctx, use_display_n
 
 
 def _build_storage_entry(port_name, entity_class, item_record, ctx):
-    """Build a storage entry."""
+    """Build a storage entry.
+
+    Returns None when the entry should be skipped entirely: either the
+    installed item can't be resolved (produces a port-name-as-Name row
+    that reference omits), or the item resolves to an @LOC_PLACEHOLDER
+    marker with no className fallback.
+    """
+    if not item_record:
+        return None
+
+    ad = item_record.get("attachDef", {})
+    name = ctx.resolve_name(ad.get("name", ""))
+    if "PLACEHOLDER" in name or not name:
+        if entity_class:
+            name = entity_class
+        else:
+            return None
+
     entry = {
-        "Name": ctx.resolve_name(item_record.get("attachDef", {}).get("name", "")) if item_record else port_name,
+        "Name": name,
         "Uneditable": True,
+        "Size": ad.get("size", 0),
+        "Grade": ad.get("grade", 0),
     }
-
-    if item_record:
-        ad = item_record.get("attachDef", {})
-        entry["Size"] = ad.get("size", 0)
-        entry["Grade"] = ad.get("grade", 0)
-        # Capacity from cargo volume
-        if ad.get("volume"):
-            entry["Capacity"] = round(ad["volume"] / 1000000.0, 2)  # microSCU to SCU
-
+    if ad.get("volume"):
+        entry["Capacity"] = round(ad["volume"] / 1000000.0, 2)
     return entry
 
 

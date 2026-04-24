@@ -239,6 +239,14 @@ def _parse_item_port(part_elem):
         "maxSize": safe_int(ip_elem.get("maxSize") or ip_elem.get("maxsize")),
     }
 
+    # defaultWeaponGroup: presence signals a pilot-controlled mount (reference
+    # classifies these as PilotWeapons even when the Type list includes a
+    # Turret subtype like BallTurret). Absence means no pilot fire-group
+    # assignment, i.e. crew-operated turrets and other non-weapon hardpoints.
+    wg = ip_elem.get("defaultWeaponGroup")
+    if wg is not None:
+        port["defaultWeaponGroup"] = wg
+
     flags = ip_elem.get("flags", "")
     if flags:
         # Preserve the $ prefix — the SPViewer reference keeps it, and it
