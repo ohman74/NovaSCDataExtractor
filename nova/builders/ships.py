@@ -1860,17 +1860,28 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
 
         entity_class, item_record = _resolve_entry(entry, ctx)
 
-        # Skip entries with no resolved entity and no installable children.
-        # An entry may list children with empty entityClassName (e.g. Vanguard
-        # Sentinel's hardpoint_weapon_missilelauncher enumerating empty
-        # torpedo_tray_*_attach_node ports); those don't install anything and
-        # reference omits the whole rack.
+        # Skip entries with no resolved entity and no installable children,
+        # UNLESS the impl XML defines a weapon-typed port at this location
+        # (Hornet F7C_*/Mk2 class_4_nose, Mustang wing_*, Terrapin weapon_nose).
+        # Reference emits empty mount slots with MinSize/MaxSize/Types/Flags
+        # for pilot-weapon ports that have no loadout item.
         raw_children = entry.get("children", [])
         if not entity_class and not any(
             c.get("entityClassName") or c.get("entityClassReference")
             for c in raw_children
         ):
-            continue
+            # Check if impl declares this as a weapon port that reference
+            # emits even when empty.
+            _pd = port_defs.get(port_name) or port_defs_lower.get(port_name.lower()) or {}
+            _pd_types = [t.lower() for t in _pd.get("types", []) or []]
+            is_weapon_slot = any(
+                t.startswith("weapongun") or t.startswith("turret") or
+                t.startswith("turretbase") or t.startswith("missilelauncher") or
+                t.startswith("bomblauncher")
+                for t in _pd_types
+            )
+            if not is_weapon_slot:
+                continue
 
         item_type = ""
         if item_record:
@@ -2666,6 +2677,24 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
         # Fallback path when no item record was resolved — best we can do is
         # the className; reference would have a GUID but we lack the lookup.
         entry["Loadout"] = entity_class
+    else:
+        # Empty mount slot (no item installed): reference still emits port
+        # definition (MinSize/MaxSize/Types/Flags). Fill from port_def only.
+        if port_def:
+            mn = port_def.get("minSize")
+            mx = port_def.get("maxSize")
+            if mn is not None:
+                entry["MinSize"] = mn
+            if mx is not None:
+                entry["MaxSize"] = mx
+            types_list = port_def.get("types") or []
+            if types_list:
+                entry["Types"] = list(types_list)
+            flags_raw = port_def.get("flags")
+            if isinstance(flags_raw, list) and flags_raw:
+                entry["Flags"] = list(flags_raw)
+            elif isinstance(flags_raw, str) and flags_raw:
+                entry["Flags"] = [f for f in flags_raw.split() if f]
 
     # Uneditable mirrors the impl-XML port "uneditable" flag.
     entry["Uneditable"] = bool(port_def and port_def.get("uneditable"))
