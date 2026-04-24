@@ -241,7 +241,9 @@ def _parse_item_port(part_elem):
 
     flags = ip_elem.get("flags", "")
     if flags:
-        port["flags"] = [f.strip().lstrip("$") for f in flags.split() if f.strip()]
+        # Preserve the $ prefix — the SPViewer reference keeps it, and it
+        # carries semantic weight (e.g. "$uneditable" vs "uneditable").
+        port["flags"] = [f.strip() for f in flags.split() if f.strip()]
         port["uneditable"] = "uneditable" in flags
 
     # PortTags and RequiredTags

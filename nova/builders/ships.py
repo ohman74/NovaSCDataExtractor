@@ -2174,8 +2174,15 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
 
         # Flags from port definition. Reference preserves "uneditable" in
         # the Flags list AND sets the Uneditable field; mirror both.
+        # port_def["flags"] is a list when sourced from the impl XML parser,
+        # but a whitespace-separated string when sourced from an item's own
+        # components.ports list (parsed_items.json). Normalize to list.
         if port_def and port_def.get("flags"):
-            entry["Flags"] = list(port_def["flags"])
+            raw = port_def["flags"]
+            if isinstance(raw, str):
+                entry["Flags"] = [f for f in raw.split() if f]
+            else:
+                entry["Flags"] = list(raw)
 
         if "gimbal" in entity_class.lower() or "turret" in full_type.lower():
             entry["Gimballed"] = True
@@ -2208,14 +2215,19 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
             for child in children:
                 child_class, child_record = _resolve_entry(child, ctx)
                 child_children = child.get("children", [])
-                # Pass parent item's sub-port definitions for tags
+                # Sub-port definitions come from the parent item's component
+                # ports list. Match case-insensitively because the loadout
+                # may store names in lower case while the item ports use
+                # camelCase (e.g. "hardpoint_jump_drive" vs "hardpoint_Jump_Drive").
+                child_pn_loadout = child.get("portName", "")
                 child_port_def = None
                 child_ports = item_record.get("components", {}).get("ports", [])
-                child_pn = child.get("portName", "")
                 for cp in child_ports:
-                    if cp.get("name", "") == child_pn:
+                    if cp.get("name", "").lower() == child_pn_loadout.lower():
                         child_port_def = cp
                         break
+                # Reference uses the item's canonical PortName casing.
+                child_pn = child_port_def.get("name") if child_port_def else child_pn_loadout
                 sub = _build_standard_entry(
                     child_pn, child_class, child_record, child_children, ctx,
                     child_port_def, parent_tags
