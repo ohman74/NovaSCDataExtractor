@@ -1367,6 +1367,16 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
     # both Turret.GunTurret and WeaponGun.Gun — WeaponGun wins).
     has_type = lambda prefix: any(t == prefix or t.startswith(prefix + ".") for t in types)
 
+    # Pilot fire-group override: ports with defaultWeaponGroup are pilot-
+    # controlled mounts. When the installed item is a Turret.* / WeaponGun.*,
+    # route to PilotWeapons even though the port's type list may also
+    # include Turret / QuantumInterdictionGenerator / Module (e.g. Hornet
+    # F7A_Mk2 center mount: multi-typed but pilot-fired).
+    if port_def.get("defaultWeaponGroup") is not None:
+        it_lower = (item_type or "").lower()
+        if it_lower.startswith("turret.") or it_lower.startswith("weapongun."):
+            return "PilotWeapons"
+
     # Weapons and weapon-like mounts. Missile/bomb racks that also carry a
     # WeaponGun.Rocket type must be matched BEFORE the WeaponGun branch
     # (bomb racks list both).
@@ -1384,7 +1394,7 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
         return "PilotWeapons"
     if has_type("weapondefensive"):
         return "Countermeasures"
-    if has_type("quantuminterdictiongenerator"):
+    if has_type("quantuminterdictiongenerator") or has_type("emp"):
         return "InterdictionHardpoints"
 
     # Turrets — after weapons so gimballed guns (Turret.GunTurret + WeaponGun)
