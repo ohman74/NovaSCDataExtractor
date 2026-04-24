@@ -1436,9 +1436,17 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
         if isinstance(tp, dict):
             thruster_type_attr = (tp.get("thrusterType", "") or "").lower()
     if has_type("mainthruster") or has_type("manneuverthruster"):
-        if thruster_type_attr == "vtol" or "vtol" in pn:
+        # Installed item className carries the authoritative role for some
+        # ships whose port name / thrusterType attribute don't match
+        # reference's classification (Hornet F7C / Gladiator top_front use
+        # items named "*_Thruster_Retro" but the item's thrusterType says
+        # "Maneuver" and the port name has no "retro" substring).
+        item_cls_lower = ""
+        if item_record:
+            item_cls_lower = (item_record.get("className", "") or "").lower()
+        if thruster_type_attr == "vtol" or "vtol" in pn or "_vtol" in item_cls_lower:
             return "VtolThrusters"
-        if thruster_type_attr == "retro" or "retro" in pn:
+        if thruster_type_attr == "retro" or "retro" in pn or "_retro" in item_cls_lower or item_cls_lower.endswith("_retro"):
             return "RetroThrusters"
         if has_type("mainthruster") or thruster_type_attr == "main":
             return "MainThrusters"
@@ -1681,14 +1689,28 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
             if name:
                 ship_internal_ports.add(name)
 
+    # Lowercase index for case-insensitive lookups. Loadouts sometimes
+    # spell a port differently from the impl (e.g. MISC_Reliant impl's
+    # Hardpoint_Thruster_LLF vs loadout's hardpoint_thruster_LLF).
+    port_defs_lower = {k.lower(): v for k, v in port_defs.items()}
+
     if port_order:
         # Sort loadout entries by their impl-XML position. Entries with no impl
         # port (rare — usually fully synthesised loadout-only ports) stay
         # appended after the impl-defined ones, in their original order.
-        loadout_entries = sorted(
-            loadout_entries,
-            key=lambda e: port_order.get(e.get("portName", ""), len(port_order) + 1),
-        )
+        # Case-insensitive lookup: loadouts sometimes spell the port in a
+        # different case from the impl (Reliant: impl Hardpoint_Thruster_*,
+        # loadout hardpoint_thruster_*).
+        port_order_lower = {k.lower(): v for k, v in port_order.items()}
+        _end = len(port_order) + 1
+
+        def _order_key(e):
+            pn = e.get("portName", "")
+            if pn in port_order:
+                return port_order[pn]
+            return port_order_lower.get(pn.lower(), _end)
+
+        loadout_entries = sorted(loadout_entries, key=_order_key)
 
     tree = {
         "Weapons": {
@@ -1764,8 +1786,16 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
             item_type = item_record.get("attachDef", {}).get("type", "")
 
         # Port definition from vehicle impl — carries the structural `types`
-        # list the classifier keys on.
-        port_def = port_defs.get(port_name, {})
+        # list the classifier keys on. Match case-insensitively: the loadout
+        # sometimes spells the port differently from the impl XML (MISC_Reliant
+        # impl has Hardpoint_Thruster_LLF but the loadout has
+        # hardpoint_thruster_LLF).
+        port_def = port_defs.get(port_name) or port_defs_lower.get(port_name.lower()) or {}
+        # Use the impl port's canonical casing for the emitted PortName when
+        # available — reference mirrors the impl casing.
+        canonical_pn = port_def.get("name") if isinstance(port_def, dict) else None
+        if canonical_pn:
+            port_name = canonical_pn
 
         category = _classify_port(port_name, item_type, port_def, item_record)
         if not category:
