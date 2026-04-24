@@ -1427,6 +1427,22 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
         # defaultWeaponGroup, so reference classes them as PilotWeapons.
         if port_def.get("defaultWeaponGroup") is not None:
             return "PilotWeapons"
+        # Classify remaining turret-typed ports by the installed item's
+        # full type. Reference's distribution is strongly type-dependent:
+        # TurretBase.MannedTurret → MannedTurrets; TurretBase.Unmanned /
+        # Turret.BottomTurret / Turret.MissileTurret / Turret.TopTurret →
+        # RemoteTurrets; Turret.NoseMounted / Turret.CanardTurret /
+        # Turret.BallTurret (mostly) / Turret.GunTurret without gimbal
+        # defaultWeaponGroup are pilot-fired fixed mounts on single-seat
+        # ships → PilotWeapons.
+        ift = (item_type or "").lower()
+        if ift.startswith("turretbase.manned"):
+            return "Turrets"  # MannedTurrets via placement
+        if ift in ("turretbase.unmanned", "turret.bottomturret",
+                   "turret.missileturret", "turret.topturret"):
+            return "RemoteTurrets"
+        if ift in ("turret.canardturret", "turret.nosemounted"):
+            return "PilotWeapons"
         return "Turrets"
     # UtilityTurret (e.g. Cyclone mining cab). Falls after Turret since it
     # currently lands in MiningHardpoints by port name convention.
@@ -1551,6 +1567,23 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
     if "weapondefensive" in it:
         return "Countermeasures"
     if "turret" in it:
+        # Route by item's full type when port_def is unavailable (port not in
+        # impl XML, e.g. Hornet F7CM variant guns). Same heuristic as the
+        # has_type("turret") branch: non-manned turret subtypes route by
+        # their reference distribution rather than defaulting to MannedTurrets.
+        ift = it  # already lowercased
+        if "remote_turret" in pn or "_remote_" in pn or "remoteturret" in pn:
+            return "RemoteTurrets"
+        if "pdc" in pn or "point_defense" in pn:
+            return "PDCTurrets"
+        if ift.startswith("turretbase.manned"):
+            return "Turrets"
+        if ift in ("turretbase.unmanned", "turret.bottomturret",
+                   "turret.missileturret", "turret.topturret"):
+            return "RemoteTurrets"
+        if ift in ("turret.canardturret", "turret.nosemounted",
+                   "turret.ballturret", "turret.gunturret"):
+            return "PilotWeapons"
         return "Turrets"
     if "shield" in it and "controller" not in it:
         return "Shields"
@@ -1798,7 +1831,12 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
 
         item_type = ""
         if item_record:
-            item_type = item_record.get("attachDef", {}).get("type", "")
+            ad = item_record.get("attachDef", {})
+            t = ad.get("type", "")
+            st = ad.get("subType", "")
+            # Compose full "Type.SubType" — classifier needs the subtype
+            # for fine-grained routing (Turret.CanardTurret vs Turret.BallTurret).
+            item_type = f"{t}.{st}" if t and st else t
 
         # Port definition from vehicle impl — carries the structural `types`
         # list the classifier keys on. Match case-insensitively: the loadout
