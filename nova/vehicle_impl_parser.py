@@ -235,8 +235,8 @@ def _parse_item_port(part_elem):
 
     port = {
         "name": part_elem.get("name", ""),
-        "minSize": safe_int(ip_elem.get("minSize")),
-        "maxSize": safe_int(ip_elem.get("maxSize")),
+        "minSize": safe_int(ip_elem.get("minSize") or ip_elem.get("minsize")),
+        "maxSize": safe_int(ip_elem.get("maxSize") or ip_elem.get("maxsize")),
     }
 
     flags = ip_elem.get("flags", "")
