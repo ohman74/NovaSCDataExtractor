@@ -1789,7 +1789,14 @@ def _rewrite_missile_bomb_loadouts(node, ctx):
 
     Mounts and racks themselves keep their GUID; only the consumable item
     living inside (BaseLoadout.Type starts with "Missile" or "Bomb")
-    switches to className. Reference convention.
+    switches to className.
+
+    Known imprecision: a small set of bespoke ship-integrated racks
+    (e.g. ANVL_Asgard's spinal turret) keep GUID for the missiles in the
+    reference. The discriminating signal isn't obvious from the data we
+    have — Uneditable, RequiredTags, and Type all overfire when used as
+    the heuristic — so we accept ~300 known mismatches here rather than
+    introduce a worse rule.
     """
     if isinstance(node, dict):
         bl = node.get("BaseLoadout")
@@ -2487,9 +2494,11 @@ def _count_hardpoints(items):
 
 # Categories whose Hardpoints/ItemsQuantity count includes nested Ports
 # (e.g. PilotWeapons Hardpoints = mount count + weapon-slot count).
+# MissileRacks/BombRacks intentionally excluded — reference counts only
+# the racks themselves, not the missile/bomb slots inside them.
 _WEAPON_CATEGORIES_RECURSIVE_COUNT = {
     "PilotWeapons", "MannedTurrets", "RemoteTurrets", "PDCTurrets",
-    "MissileRacks", "BombRacks", "UtilityHardpoints", "UtilityTurrets",
+    "UtilityHardpoints", "UtilityTurrets",
 }
 
 
