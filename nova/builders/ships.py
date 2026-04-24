@@ -2352,6 +2352,19 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
         parent_tags_str = ad.get("tags", "")
         parent_tags = parent_tags_str.split() if parent_tags_str else []
 
+        # Top-level turret items (Turret.* / TurretBase.*) carry their weapon
+        # in the ITEM's defaultLoadout rather than the ship loadout; the ship
+        # just mounts the turret. Fall back to the item's internal loadout
+        # for the weapon-inside-turret sub-port when the outer loadout entry
+        # had no children. Scoped to turret-like items to avoid over-emitting
+        # internal ports on non-turret items (life-support, radars, etc.).
+        if not children and not is_sub_port and (
+            full_type.startswith("Turret.") or full_type.startswith("TurretBase.")
+        ):
+            item_default = item_record.get("components", {}).get("defaultLoadout", [])
+            if item_default:
+                children = item_default
+
         if children:
             sub_items = []
             for child in children:

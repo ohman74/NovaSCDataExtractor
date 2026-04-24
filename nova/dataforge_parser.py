@@ -1246,14 +1246,18 @@ def _parse_port_container(comp):
 
 def _parse_item_port(elem):
     """Parse a single SItemPortDef."""
+    flags = elem.get("Flags", "")
     port = {
         "name": elem.get("Name", elem.get("name", "")),
         "minSize": safe_int(elem.get("MinSize")),
         "maxSize": safe_int(elem.get("MaxSize")),
         "portTags": elem.get("PortTags", ""),
         "requiredPortTags": elem.get("RequiredPortTags", ""),
-        "flags": elem.get("Flags", ""),
-        "uneditable": safe_bool(elem.get("Uneditable")),
+        "flags": flags,
+        # Uneditable is true if the explicit attribute is set OR if the flags
+        # string contains "uneditable" / "$uneditable" (e.g. PDC turret
+        # internal weapon ports use the flag form only).
+        "uneditable": safe_bool(elem.get("Uneditable")) or "uneditable" in (flags or "").lower(),
     }
 
     # Types - each SItemPortDefTypes has a Type attr and SubTypes > Enum children
