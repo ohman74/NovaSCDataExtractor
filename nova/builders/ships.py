@@ -1869,26 +1869,25 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
         entity_class, item_record = _resolve_entry(entry, ctx)
 
         # Skip entries with no resolved entity and no installable children,
-        # UNLESS the impl XML defines a weapon-typed port at this location
+        # UNLESS the impl XML defines a pilot-weapon port at this location
         # (Hornet F7C_*/Mk2 class_4_nose, Mustang wing_*, Terrapin weapon_nose).
         # Reference emits empty mount slots with MinSize/MaxSize/Types/Flags
-        # for pilot-weapon ports that have no loadout item.
+        # for pilot-weapon ports (WeaponGun.* or Turret.*) that have no
+        # loadout item, but NOT for missile-launcher / bomb-launcher slots
+        # (those are racks; an empty rack is omitted entirely).
         raw_children = entry.get("children", [])
         if not entity_class and not any(
             c.get("entityClassName") or c.get("entityClassReference")
             for c in raw_children
         ):
-            # Check if impl declares this as a weapon port that reference
-            # emits even when empty.
             _pd = port_defs.get(port_name) or port_defs_lower.get(port_name.lower()) or {}
             _pd_types = [t.lower() for t in _pd.get("types", []) or []]
-            is_weapon_slot = any(
+            is_pilot_weapon_slot = any(
                 t.startswith("weapongun") or t.startswith("turret") or
-                t.startswith("turretbase") or t.startswith("missilelauncher") or
-                t.startswith("bomblauncher")
+                t.startswith("turretbase")
                 for t in _pd_types
             )
-            if not is_weapon_slot:
+            if not is_pilot_weapon_slot:
                 continue
 
         item_type = ""
