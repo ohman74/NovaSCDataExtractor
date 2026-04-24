@@ -1349,8 +1349,15 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
     # Weapon-rack ports use a Door mechanism (opens to reveal the rack), so
     # the port's type is Door even though the hardpoint is a rack. Check the
     # port name first so these don't get skipped by the Door rule below.
-    if "weapon_rack" in pn or "weaponlocker" in pn or "weapon_locker" in pn:
+    # Also match by installed item className (ANVL_Valkyrie uses ports named
+    # hardpoint_Weapon_Cabinet_* with Weapon_Rack_ANVL_Valkyrie_1Slot items).
+    if "weapon_rack" in pn or "weaponlocker" in pn or "weapon_locker" in pn \
+            or "weapon_cabinet" in pn:
         return "WeaponsRacks"
+    if item_record:
+        item_cn = (item_record.get("className", "") or "").lower()
+        if item_cn.startswith("weapon_rack_") or "_weapon_rack_" in item_cn:
+            return "WeaponsRacks"
 
     # ── Structural skip: port types that never carry a gameplay hardpoint. ──
     # Skip only when *every* declared type on the port is in the skip set;
@@ -1932,8 +1939,16 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
     # via the entity XML rather than the defaultLoadout. For those, the
     # reference still lists the grid, so when the loadout walk yields
     # nothing we fall back to name-prefix matching for one-shot inclusion.
+    # Exclude ships with modular hardpoints (Retaliator front/rear module
+    # slots) — any CargoGrid named after the ship belongs to a module, not
+    # the base ship, and reference treats the base ship as having no grid.
     cargo_grid_items = _build_cargo_grid_items_from_loadout(loadout_entries, ctx)
-    if not cargo_grid_items and class_name:
+    has_modules = any(
+        "module" in (e.get("portName", "").lower())
+        and (e.get("entityClassName") or e.get("entityClassReference"))
+        for e in loadout_entries
+    )
+    if not cargo_grid_items and class_name and not has_modules:
         cargo_grid_items = _build_cargo_grid_items_by_name(class_name, ctx)
     if cargo_grid_items:
         tree["Components"]["CargoGrids"]["InstalledItems"] = cargo_grid_items
@@ -2389,16 +2404,16 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
         if not _omit_baseloadout_class(full_type):
             bl["Class"] = bl_class
         entry["BaseLoadout"] = bl
-        # Types: from port definition (vehicle impl) if available, otherwise
-        # fall back to the item's declared type (entity XML). Reference
-        # collapses a trailing ".UNDEFINED" subtype to the base type and
-        # does NOT include the installed item's child-port types.
+        # Types: use the port definition's declared types list if present
+        # and non-empty. When the port_def exists but has an empty types list
+        # (ship-internal ports on Centurion/Hull/Prospector/etc.), reference
+        # omits Types from the entry entirely — do NOT fall back to the
+        # installed item's declared type. Only use the item type fallback
+        # when no port_def was found at all.
         if port_def and port_def.get("types"):
             entry["Types"] = port_def["types"]
-        elif full_type:
+        elif not port_def and full_type:
             entry["Types"] = [full_type.split(".UNDEFINED")[0] if full_type.endswith(".UNDEFINED") else full_type]
-        else:
-            entry["Types"] = []
 
         # Flags from port definition. Reference preserves "uneditable" in
         # the Flags list AND sets the Uneditable field; mirror both.
