@@ -929,16 +929,17 @@ def _build_flight_characteristics(loadout_entries, ctx):
 
     result["IsVtolAssisted"] = has_vtol
 
-    # Thrust capacity aggregated by type
+    # Thrust capacity aggregated by type. Reference keeps 1 decimal of precision
+    # on the summed thrust totals (e.g. 5725176.4 N), so match that.
     if thrust_by_type:
         result["ThrustCapacity"] = {
-            "Main": round(thrust_by_type.get("Main", 0.0)),
-            "Retro": round(thrust_by_type.get("Retro", 0.0)),
-            "Vtol": round(thrust_by_type.get("VTOL", 0.0)),
-            "Maneuvering": round(thrust_by_type.get("Maneuvering", 0.0)),
+            "Main": round(thrust_by_type.get("Main", 0.0), 1),
+            "Retro": round(thrust_by_type.get("Retro", 0.0), 1),
+            "Vtol": round(thrust_by_type.get("VTOL", 0.0), 1),
+            "Maneuvering": round(thrust_by_type.get("Maneuvering", 0.0), 1),
         }
 
-    # AccelerationG — computed from thrust / mass (not available here, skip for now)
+    # AccelerationG is curated external data (IsValidated/CheckDate) — skipped in compare.
 
     # MasterModes — BaseSpoolTime defaults to 1.0 (SPViewer convention).
     ifcs_core = ifcs.get("ifcsCoreParams", {})

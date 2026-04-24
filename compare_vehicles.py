@@ -24,6 +24,11 @@ from collections import Counter
 # actually fill from game data. Skip them in comparison.
 _SKIP_FIELDS_METADATA = {"CommLink", "ProgressTracker", "Store", "PU", "New Ship", "New Vehicle"}
 _SKIP_FIELDS_STATS = {"Buy", "New Ship", "New Vehicle"}
+
+# Nested sub-fields stripped from both ref and out before comparison. AccelerationG
+# inside FlightCharacteristics is curated external data (IsValidated/CheckDate)
+# we can't derive from game files, same convention as the top-level external skips.
+_SKIP_NESTED_STATS = [("FlightCharacteristics", "AccelerationG")]
 _SKIP_FIELDS_HARDPOINTS = set()
 
 
@@ -152,12 +157,20 @@ def _load_json(path, bom=True):
         return json.load(f)
 
 
+def _strip_nested(records, nested_skips):
+    for r in records:
+        for parent, child in nested_skips:
+            if isinstance(r.get(parent), dict):
+                r[parent].pop(child, None)
+    return records
+
+
 def main():
     out_meta = {r["ClassName"]: r for r in _load_json("output/vehicle_metadata.json", bom=False)}
     out_stats = {r["ClassName"]: r for r in _load_json("output/vehicle_stats.json", bom=False)}
     out_hp = {r["ClassName"]: r for r in _load_json("output/vehicle_hardpoints.json", bom=False)}
     e0 = _load_json("temp/reference_data_new/entry_0.json")
-    e1 = _load_json("temp/reference_data_new/entry_1.json")
+    e1 = _strip_nested(_load_json("temp/reference_data_new/entry_1.json"), _SKIP_NESTED_STATS)
     e2 = _load_json("temp/reference_data_new/entry_2.json")
 
     slices = [
