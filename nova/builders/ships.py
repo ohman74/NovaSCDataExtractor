@@ -1452,9 +1452,13 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
         if "tractor" in pn:
             return "UtilityHardpoints"
         # Remote-operated turrets (no occupant; pilot or remote crew member
-        # fires from a console). Port name is the cleanest discriminator;
-        # ANVL_Paladin uses hardpoint_remoteturret_* (no underscore).
-        if "remote_turret" in pn or "_remote_" in pn or "remoteturret" in pn:
+        # fires from a console). Port name or installed item className is
+        # the cleanest discriminator.
+        item_cn_lower = ""
+        if item_record:
+            item_cn_lower = (item_record.get("className", "") or "").lower()
+        if ("remote_turret" in pn or "_remote_" in pn or "remoteturret" in pn
+                or "_remote_turret" in item_cn_lower or "remote_turret" in item_cn_lower):
             return "RemoteTurrets"
         # Point Defense (PDC) turrets — small autonomous turrets on capitals.
         if "pdc" in pn or "point_defense" in pn:
@@ -1615,7 +1619,11 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
         # has_type("turret") branch: non-manned turret subtypes route by
         # their reference distribution rather than defaulting to MannedTurrets.
         ift = it  # already lowercased
-        if "remote_turret" in pn or "_remote_" in pn or "remoteturret" in pn:
+        item_cn_lower = ""
+        if item_record:
+            item_cn_lower = (item_record.get("className", "") or "").lower()
+        if ("remote_turret" in pn or "_remote_" in pn or "remoteturret" in pn
+                or "_remote_turret" in item_cn_lower or "remote_turret" in item_cn_lower):
             return "RemoteTurrets"
         if "pdc" in pn or "point_defense" in pn:
             return "PDCTurrets"
