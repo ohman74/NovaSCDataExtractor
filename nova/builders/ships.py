@@ -1952,7 +1952,13 @@ def _enrich_controllers(tree, loadout_entries, ctx, class_name):
     if "InstalledItems" in controllers:
         del controllers["InstalledItems"]
 
-    # Missiles: walk loadout for controller_missile port
+    # Missiles: walk loadout for a controller_missile port and use that item's
+    # SCItemMissileControllerParams if present. Reference always emits the
+    # Missiles block: ships with any MissileRacks get the default
+    # Controller_Missile values (MaxArmed=4, Cooldown=4) when the loadout
+    # doesn't specify a custom controller, and ships with no MissileRacks
+    # get zeros. Ships do sometimes have a controller_missile port without
+    # a loadout entry — the defaults still apply in that case.
     missile_data = {}
 
     def _walk(entries):
@@ -1975,13 +1981,82 @@ def _enrich_controllers(tree, loadout_entries, ctx, class_name):
                 _walk([c])
 
     _walk(loadout_entries)
-    if missile_data:
-        controllers["Missiles"] = missile_data
+
+    if not missile_data:
+        # No custom controller in loadout. Decide between the default
+        # Controller_Missile values and zeros based on whether the ship
+        # has any missile racks or bomb racks installed.
+        mr = tree.get("Weapons", {}).get("MissileRacks", {}) or {}
+        br = tree.get("Weapons", {}).get("BombRacks", {}) or {}
+        has_missiles = bool(mr.get("InstalledItems") or br.get("InstalledItems"))
+        if has_missiles:
+            default = ctx.get_item("Controller_Missile")
+            if default:
+                mc = default.get("components", {}).get("SCItemMissileControllerParams", {})
+                if isinstance(mc, dict):
+                    ma = mc.get("maxArmedMissiles")
+                    lc = mc.get("launchCooldownTime")
+                    if ma is not None:
+                        missile_data["MaxArmed"] = float(ma)
+                    if lc is not None:
+                        missile_data["Cooldown"] = float(lc)
+        else:
+            missile_data = {"MaxArmed": 0.0, "Cooldown": 0.0}
+    controllers["Missiles"] = missile_data
 
     # Weapons: from weapon_pool_sizes (WeaponGun pool)
     pool = ctx.weapon_pool_sizes.get(class_name.lower())
     if pool:
         controllers["Weapons"] = {"PoolSize": float(pool)}
+
+    # CapacitorAssignment: pull the AfterBurner GUIDs + AngVelocity curve from
+    # the flight controller's IFCSParams.afterburner block. Reference always
+    # emits ShieldEmitter/PilotWeapon/TurretsWeapon as empty {} alongside
+    # AfterBurner (201/201 ships in the dataset).
+    cap_assignment = {
+        "AfterBurner": {},
+        "ShieldEmitter": {},
+        "PilotWeapon": {},
+        "TurretsWeapon": {},
+    }
+
+    def _walk_flight(entries):
+        for e in entries:
+            pn = e.get("portName", "").lower()
+            if "controller_flight" in pn or "flight_blade" in pn:
+                _, item = _resolve_entry(e, ctx)
+                if item:
+                    ifcs = item.get("components", {}).get("IFCSParams", {})
+                    ab = ifcs.get("afterburner", {}) if isinstance(ifcs, dict) else {}
+                    if isinstance(ab, dict) and ab:
+                        block = {}
+                        regen = ab.get("capacitorAssignmentInputOutputRegen", "")
+                        if regen and regen != "00000000-0000-0000-0000-000000000000":
+                            block["Regen"] = regen
+                        regen_nav = ab.get("capacitorAssignmentInputOutputRegenNavMode", "")
+                        if regen_nav and regen_nav != "00000000-0000-0000-0000-000000000000":
+                            block["RegenNavMode"] = regen_nav
+                        usage = ab.get("capacitorAssignmentInputOutputUsage", "")
+                        if usage and usage != "00000000-0000-0000-0000-000000000000":
+                            block["Usage"] = usage
+                        # AngVelocity: afterburnerAngCapacitorScalingCurve.points.Vec2
+                        curve = ab.get("afterburnerAngCapacitorScalingCurve", {}) or {}
+                        points = curve.get("points", {}) if isinstance(curve, dict) else {}
+                        vec_list = points.get("Vec2", []) if isinstance(points, dict) else []
+                        if isinstance(vec_list, list) and vec_list:
+                            block["AngVelocity"] = [
+                                {"x": safe_float(v.get("x", 0)),
+                                 "y": safe_float(v.get("y", 0))}
+                                for v in vec_list if isinstance(v, dict)
+                            ]
+                        if block:
+                            cap_assignment["AfterBurner"] = block
+                            return
+            for c in e.get("children", []):
+                _walk_flight([c])
+
+    _walk_flight(loadout_entries)
+    controllers["CapacitorAssignment"] = cap_assignment
 
     # Wheeled: always emit (empty {} for ships)
     if "Wheeled" not in controllers:
