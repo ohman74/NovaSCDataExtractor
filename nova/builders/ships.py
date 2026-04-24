@@ -1304,7 +1304,9 @@ _SKIP_PORT_TYPES = frozenset({
     "commscontroller", "coolercontroller", "shieldcontroller",
     "capacitorassignmentcontroller", "missilecontroller", "fuelcontroller",
     "salvagecontroller", "airtrafficcontroller", "miningcontroller",
-    "wheeledcontroller", "targetselector",
+    "targetselector",
+    # note: wheeledcontroller is intentionally NOT skipped — reference emits it
+    # under Controllers.Wheeled.InstalledItems for ground vehicles.
     # Animation / interior / structural shells
     "room", "interior", "crosssection", "attachedpart",
     # Helpers / ambient systems / avionics that aren't gameplay hardpoints
@@ -1496,6 +1498,11 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
         return "HydrogenFuelTanks"
     if has_type("armor"):
         return "Armor"
+    # Ground-vehicle drivetrain controller (Controller_Wheel on wheeled
+    # craft like ANVL_Ballista, Cyclone, Mule). Reference places these
+    # under Controllers.Wheeled.InstalledItems.
+    if has_type("wheeledcontroller") or "controller_wheel" in pn:
+        return "WheeledController"
     if has_type("cargogrid"):
         return "CargoGrids"
     if has_type("selfdestruct"):
@@ -2130,9 +2137,21 @@ def _enrich_controllers(tree, loadout_entries, ctx, class_name):
     _walk_flight(loadout_entries)
     controllers["CapacitorAssignment"] = cap_assignment
 
-    # Wheeled: always emit (empty {} for ships)
+    # Wheeled: always emit (empty {} for ships; populated with wheel
+    # controller entries for ground vehicles).
     if "Wheeled" not in controllers:
         controllers["Wheeled"] = {}
+    # Ifcs: always emit (populated from the flight controller inlining above
+    # for spaceships; empty {} for ground vehicles that reference still
+    # emits but with no inner content).
+    if "Ifcs" not in controllers:
+        controllers["Ifcs"] = {}
+    # If entries were placed into Wheeled but the container still lacks an
+    # InstalledItems list (edge case), ensure the block has the shape that
+    # _update_counts expects.
+    w = controllers.get("Wheeled")
+    if isinstance(w, dict) and w.get("InstalledItems") and "Hardpoints" not in w:
+        w["Hardpoints"] = len(w["InstalledItems"])
 
 
 def _enrich_radar_detection(tree, ctx):
@@ -2802,6 +2821,7 @@ _PLACEMENT = {
     "HydrogenFuelTanks":    ("Components", "Propulsion", "HydrogenFuelTanks"),
     # Components > Systems
     "ShieldControllers":    ("Components", "Systems", "Controllers"),
+    "WheeledController":    ("Components", "Systems", "Controllers", "Wheeled"),
     "Shields":              ("Components", "Systems", "Shields"),
     "Coolers":              ("Components", "Systems", "Coolers"),
     "LifeSupport":          ("Components", "Systems", "LifeSupport"),
