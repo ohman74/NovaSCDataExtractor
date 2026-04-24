@@ -462,18 +462,13 @@ def _omit_baseloadout_class(full_type):
     return full_type in _BASELOADOUT_CLASS_OMIT_TYPES
 
 
-def _build_cargo_grid_items(class_name, ctx):
-    """Find CargoGrid items belonging to this ship and emit reference shape.
+def _build_cargo_grid_items_by_name(class_name, ctx):
+    """Name-prefix fallback for ships whose cargo grids aren't in the loadout.
 
-    Items follow the naming convention "<VehicleClassName>_CargoGrid_*" and
-    carry an SCItemInventoryContainerComponentParams pointing at an
-    InventoryContainer record. The reference computes:
-      Capacity = inventory.capacity
-      GridProperties.Width  = floor(interiorDimensions.x / 1.25)
-      GridProperties.Depth  = floor(interiorDimensions.y / 1.25)
-      GridProperties.Height = floor(interiorDimensions.z / 1.25)
-    plus MinContainerSize / MaxContainerSize from the min/maxPermittedItemSize
-    fields, divided by 1.25.
+    Matches CargoGrid items whose className starts with "<VehicleClassName>_CargoGrid".
+    Used only when the loadout walk returns nothing — so we don't risk
+    double-counting ships like the Reclaimer whose grids are already in
+    the loadout.
     """
     prefix = class_name + "_CargoGrid"
     out = []
@@ -483,48 +478,108 @@ def _build_cargo_grid_items(class_name, ctx):
         ad = item.get("attachDef", {})
         if ad.get("type") != "CargoGrid":
             continue
-        comps = item.get("components", {})
-        inv_comp = comps.get("SCItemInventoryContainerComponentParams", {})
-        guid = inv_comp.get("containerParams", "") if isinstance(inv_comp, dict) else ""
-        inv = ctx.inventory_containers.get(guid) if guid else None
-        if not inv:
-            continue
-
-        def _grid_dims(d):
-            if not isinstance(d, dict):
-                return None
-            return {
-                "Width": float(int(safe_float(d.get("x", 0)) / 1.25)),
-                "Height": float(int(safe_float(d.get("z", 0)) / 1.25)),
-                "Depth": float(int(safe_float(d.get("y", 0)) / 1.25)),
-            }
-        def _container_size(d):
-            dims = _grid_dims(d)
-            if not dims:
-                return None
-            cap = float(dims["Width"] * dims["Height"] * dims["Depth"])
-            return {"Capacity": cap, **dims}
-
-        interior = inv.get("interiorDimensions") or {}
-        grid_dims = _grid_dims(interior) or {"Width": 0, "Height": 0, "Depth": 0}
-        grid_props = dict(grid_dims)
-        min_size = _container_size(inv.get("minPermittedItemSize"))
-        max_size = _container_size(inv.get("maxPermittedItemSize"))
-        if min_size:
-            grid_props["MinContainerSize"] = min_size
-        if max_size:
-            grid_props["MaxContainerSize"] = max_size
-
-        out.append({
-            "Name": cn,
-            "Mass": float((comps.get("physics") or {}).get("mass", 0)),
-            "Size": ad.get("size", 0),
-            "Grade": ad.get("grade", 0),
-            "Capacity": float(inv.get("capacity", 0)),
-            "GridProperties": grid_props,
-            "Uneditable": True,
-        })
+        entry = _cargo_grid_entry_from_item(cn, item, ctx)
+        if entry:
+            out.append(entry)
     out.sort(key=lambda x: x["Name"])
+    return out
+
+
+def _cargo_grid_entry_from_item(class_name, item, ctx):
+    """Render a single CargoGrid InstalledItems entry from a resolved item record."""
+    ad = item.get("attachDef", {})
+    comps = item.get("components", {})
+    inv_comp = comps.get("SCItemInventoryContainerComponentParams", {})
+    guid = inv_comp.get("containerParams", "") if isinstance(inv_comp, dict) else ""
+    inv = ctx.inventory_containers.get(guid) if guid else None
+    if not inv:
+        return None
+
+    def _grid_dims(d):
+        if not isinstance(d, dict):
+            return None
+        return {
+            "Width": float(int(safe_float(d.get("x", 0)) / 1.25)),
+            "Height": float(int(safe_float(d.get("z", 0)) / 1.25)),
+            "Depth": float(int(safe_float(d.get("y", 0)) / 1.25)),
+        }
+
+    def _container_size(d):
+        dims = _grid_dims(d)
+        if not dims:
+            return None
+        cap = float(dims["Width"] * dims["Height"] * dims["Depth"])
+        return {"Capacity": cap, **dims}
+
+    interior = inv.get("interiorDimensions") or {}
+    grid_dims = _grid_dims(interior) or {"Width": 0, "Height": 0, "Depth": 0}
+    grid_props = dict(grid_dims)
+    min_size = _container_size(inv.get("minPermittedItemSize"))
+    max_size = _container_size(inv.get("maxPermittedItemSize"))
+    if min_size:
+        grid_props["MinContainerSize"] = min_size
+    if max_size:
+        grid_props["MaxContainerSize"] = max_size
+
+    return {
+        "Name": class_name,
+        "Mass": float((comps.get("physics") or {}).get("mass", 0)),
+        "Size": ad.get("size", 0),
+        "Grade": ad.get("grade", 0),
+        "Capacity": float(inv.get("capacity", 0)),
+        "GridProperties": grid_props,
+        "Uneditable": True,
+    }
+
+
+def _build_cargo_grid_items_from_loadout(loadout_entries, ctx):
+    """Walk the loadout for CargoGrid items (one entry per installed port).
+
+    Reference counts installed instances, not unique items: the Reclaimer has
+    4 ports each installing "AEGS_Reclaimer_CargoGrid_Small" and
+    "AEGS_Reclaimer_CargoGrid_Large", so 8 Small/Large entries plus 4
+    Salvage entries = 12 InstalledItems.
+    """
+    out = []
+
+    def _walk(entries):
+        for entry in entries:
+            entity_class, item = _resolve_entry(entry, ctx)
+            if item and item.get("attachDef", {}).get("type") == "CargoGrid":
+                rec = _cargo_grid_entry_from_item(entity_class, item, ctx)
+                if rec:
+                    out.append(rec)
+            for child in entry.get("children", []) or []:
+                _walk([child])
+
+    _walk(loadout_entries)
+    return out
+
+
+def _build_weapon_rack_entry(port_name, item_record):
+    """Reference uses a flat shape for WeaponsRacks: per-rack {Name, Size,
+    Uneditable, Ports[]} where each port is {Name, MinSize, MaxSize, Uneditable}.
+    No Loadout / BaseLoadout / Types — the rack item itself is just the
+    container for the FPS weapon slots that hang off it.
+    """
+    if not item_record:
+        return None
+    ad = item_record.get("attachDef", {})
+    sub_ports = item_record.get("components", {}).get("ports", []) or []
+    out = {
+        "Name": port_name,
+        "Size": ad.get("size", 0),
+        "Uneditable": True,
+        "Ports": [
+            {
+                "Name": p.get("name", ""),
+                "MinSize": p.get("minSize", 0),
+                "MaxSize": p.get("maxSize", 0),
+                "Uneditable": bool(p.get("uneditable")),
+            }
+            for p in sub_ports
+        ],
+    }
     return out
 
 
@@ -1679,6 +1734,10 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
             hp = _build_self_destruct_entry(item_record, ctx)
             if hp:
                 _place(tree, category, hp)
+        elif category == "WeaponsRacks":
+            hp = _build_weapon_rack_entry(port_name, item_record)
+            if hp:
+                _place(tree, category, hp)
         else:
             hp = _build_standard_entry(port_name, entity_class, item_record, children, ctx, port_def)
             _place(tree, category, hp)
@@ -1762,14 +1821,19 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
             total = sum(float(it.get("Capacity", 0) or 0) for it in block.get("InstalledItems", []))
             block[total_field] = total
 
-    # CargoGrids: pull from CargoGrid items whose className starts with the
-    # ship's class name (e.g. AEGS_Hammerhead_CargoGrid_Main belongs to
-    # AEGS_Hammerhead). Reference inlines Capacity + grid dimensions
-    # computed from the inventory container's interiorDimensions.
-    if class_name:
-        cargo_grid_items = _build_cargo_grid_items(class_name, ctx)
-        if cargo_grid_items:
-            tree["Components"]["CargoGrids"]["InstalledItems"] = cargo_grid_items
+    # CargoGrids: walk the defaultLoadout for any port whose installed item
+    # has attachDef.type=="CargoGrid" and emit one entry per port. Reference
+    # counts installation instances (e.g. AEGS_Reclaimer has 4 ports each
+    # for the Small/Large grids), so we cannot deduplicate by item.
+    # Fallback: some ships (e.g. AEGS_Hammerhead) define a single cargo grid
+    # via the entity XML rather than the defaultLoadout. For those, the
+    # reference still lists the grid, so when the loadout walk yields
+    # nothing we fall back to name-prefix matching for one-shot inclusion.
+    cargo_grid_items = _build_cargo_grid_items_from_loadout(loadout_entries, ctx)
+    if not cargo_grid_items and class_name:
+        cargo_grid_items = _build_cargo_grid_items_by_name(class_name, ctx)
+    if cargo_grid_items:
+        tree["Components"]["CargoGrids"]["InstalledItems"] = cargo_grid_items
 
     # Update counts
     _update_counts(tree)
