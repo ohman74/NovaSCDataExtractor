@@ -1669,7 +1669,8 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
             hp = _build_cm_entry(port_name, entity_class, item_record, ctx)
             _place(tree, category, hp)
         elif category in ("HydrogenFuelTanks", "QuantumFuelTanks", "FuelIntakes"):
-            hp = _build_simple_entry(port_name, entity_class, item_record, ctx)
+            hp = _build_simple_entry(port_name, entity_class, item_record, ctx,
+                                      use_display_name=(category == "QuantumFuelTanks"))
             _place(tree, category, hp)
         elif category == "Storage":
             hp = _build_storage_entry(port_name, entity_class, item_record, ctx)
@@ -1891,6 +1892,10 @@ def _enrich_radar_detection(tree, ctx):
         class_name = radar_entry.get("Loadout", "")
         if not class_name:
             continue
+        # _enrich_radar_detection runs before the Loadout-convention rewrite
+        # (Components Loadouts are still GUIDs at this point); resolve when so.
+        if _GUID_RE.match(class_name):
+            class_name = ctx.resolve_guid(class_name) or class_name
         item = ctx.get_item(class_name)
         if not item:
             continue
@@ -2302,9 +2307,22 @@ def _build_cm_entry(port_name, entity_class, item_record, ctx):
     return entry
 
 
-def _build_simple_entry(port_name, entity_class, item_record, ctx):
-    """Build a simple entry for fuel tanks, intakes, etc."""
-    entry = {"Name": port_name}
+def _build_simple_entry(port_name, entity_class, item_record, ctx, use_display_name=False):
+    """Build a simple entry for fuel tanks, intakes, etc.
+
+    Name convention is category-dependent in the reference:
+      QuantumFuelTanks → localized item name ("Internal Tank")
+      HydrogenFuelTanks, FuelIntakes → raw port name (e.g. "hardpoint_fuel_tank_left")
+    Caller passes use_display_name=True for QuantumFuelTanks only.
+    """
+    name = port_name
+    if use_display_name and item_record:
+        ad_name = item_record.get("attachDef", {}).get("name", "")
+        if ad_name:
+            resolved = ctx.resolve_name(ad_name)
+            if resolved and not resolved.startswith("@LOC_") and "PLACEHOLDER" not in resolved:
+                name = resolved
+    entry = {"Name": name}
 
     if item_record:
         ad = item_record.get("attachDef", {})
