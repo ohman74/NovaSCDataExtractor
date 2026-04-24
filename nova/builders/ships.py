@@ -1683,9 +1683,16 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
             hp = _build_standard_entry(port_name, entity_class, item_record, children, ctx, port_def)
             _place(tree, category, hp)
 
-            # FlightBlade also gets an IFCS entry under Controllers
+            # FlightBlade also gets an IFCS entry under Controllers, with the
+            # flight controller item's ResourceNetwork inlined (reference shape).
             if category == "FlightBlade" and item_record:
                 ifcs_entry = {"ClassName": entity_class}
+                from .stditem import _build_resource_network_from_irp
+                irp = item_record.get("components", {}).get("ItemResourceComponentParams", {})
+                if isinstance(irp, dict) and irp:
+                    rn = _build_resource_network_from_irp(irp)
+                    if rn:
+                        ifcs_entry["ResourceNetwork"] = rn
                 tree["Components"]["Systems"]["Controllers"].setdefault(
                     "Ifcs", {"InstalledItems": []}
                 )["InstalledItems"].append(ifcs_entry)
