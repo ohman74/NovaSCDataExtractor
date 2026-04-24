@@ -1397,8 +1397,9 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
         if "tractor" in pn:
             return "UtilityHardpoints"
         # Remote-operated turrets (no occupant; pilot or remote crew member
-        # fires from a console). Port name is the cleanest discriminator.
-        if "remote_turret" in pn or "_remote_" in pn:
+        # fires from a console). Port name is the cleanest discriminator;
+        # ANVL_Paladin uses hardpoint_remoteturret_* (no underscore).
+        if "remote_turret" in pn or "_remote_" in pn or "remoteturret" in pn:
             return "RemoteTurrets"
         # Point Defense (PDC) turrets — small autonomous turrets on capitals.
         if "pdc" in pn or "point_defense" in pn:
@@ -2212,13 +2213,18 @@ def _resolve_entry(entry, ctx):
     return "", None
 
 
-def _build_standard_entry(port_name, entity_class, item_record, children, ctx, port_def=None, parent_tags=None, source_entry=None):
+def _build_standard_entry(port_name, entity_class, item_record, children, ctx, port_def=None, parent_tags=None, source_entry=None, is_sub_port=False):
     """Build a standard hardpoint entry with BaseLoadout and sub-ports.
 
     Loadout form (GUID vs className) mirrors the source loadout XML: when the
     entry references the item via `entityClassReference` (a GUID), Loadout
     emits the GUID; when via `entityClassName`, Loadout emits the className.
     Falls back to GUID when the source form is ambiguous.
+
+    `is_sub_port` = True when recursing into a parent item's child ports
+    (e.g. the weapon slot inside a turret). Sub-ports never get the
+    top-level Fixed:true marker that reference applies only to outermost
+    WeaponGun.* pilot mounts.
     """
     entry = {"PortName": port_name}
 
@@ -2302,15 +2308,17 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
             else:
                 entry["Flags"] = list(raw)
 
-        # Gimballed vs Turret: Turret.GunTurret mounts are gimbals (pilot aims,
-        # mount tracks) and get Gimballed=True. Every other Turret.* / TurretBase.*
-        # type is a proper turret (BallTurret/NoseMounted/Canard/Top/Bottom/PDC/
-        # MannedTurret/Unmanned/MissileTurret) and gets Turret=True. WeaponGun.*
-        # and Module.* mounts get neither.
+        # Gimballed / Turret / Fixed flags: Turret.GunTurret mounts are gimbals
+        # (pilot aims, mount tracks) -> Gimballed:true. Other Turret.* /
+        # TurretBase.* types (BallTurret/NoseMounted/Canard/Top/Bottom/PDC/
+        # MannedTurret/Unmanned/MissileTurret) -> Turret:true. WeaponGun.*
+        # mounts are direct weapon hardpoints with no gimbal -> Fixed:true.
         if "gimbal" in entity_class.lower() or full_type == "Turret.GunTurret":
             entry["Gimballed"] = True
         elif full_type.startswith("Turret.") or full_type.startswith("TurretBase."):
             entry["Turret"] = True
+        elif full_type.startswith("WeaponGun.") and not is_sub_port:
+            entry["Fixed"] = True
 
         # PortTags from vehicle impl port definition
         if port_def:
@@ -2354,7 +2362,7 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
                 child_pn = child_port_def.get("name") if child_port_def else child_pn_loadout
                 sub = _build_standard_entry(
                     child_pn, child_class, child_record, child_children, ctx,
-                    child_port_def, parent_tags, source_entry=child
+                    child_port_def, parent_tags, source_entry=child, is_sub_port=True
                 )
                 if sub:
                     sub_items.append(sub)
