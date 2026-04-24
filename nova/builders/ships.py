@@ -489,8 +489,13 @@ def _build_cargo_grid_items_by_name(class_name, ctx):
     return out
 
 
-def _cargo_grid_entry_from_item(class_name, item, ctx):
-    """Render a single CargoGrid InstalledItems entry from a resolved item record."""
+def _cargo_grid_entry_from_item(class_name, item, ctx, port_name=None):
+    """Render a single CargoGrid InstalledItems entry from a resolved item record.
+
+    Name: uses the item className when it contains "_CargoGrid_" (e.g.
+    AEGS_Reclaimer_CargoGrid_Small). Falls back to the port name when the
+    item is a generic plate (MISC_Hull_A_CargoPlate → hardpoint_cargoplate_*).
+    """
     ad = item.get("attachDef", {})
     comps = item.get("components", {})
     inv_comp = comps.get("SCItemInventoryContainerComponentParams", {})
@@ -525,8 +530,19 @@ def _cargo_grid_entry_from_item(class_name, item, ctx):
     if max_size:
         grid_props["MaxContainerSize"] = max_size
 
+    name = class_name
+    # Hull_A/B/C and similar ships that mount external cargoplates on
+    # "hardpoint_cargoplate_*" / "hardpoint_cargo_strut_*" ports display
+    # the port name instead of the grid item's className. Other ships
+    # with grid items ending in _CargoGrid (e.g. Asgard) still use the
+    # className.
+    if port_name:
+        low_pn = port_name.lower()
+        if "cargoplate" in low_pn or "cargo_strut" in low_pn:
+            name = port_name
+
     return {
-        "Name": class_name,
+        "Name": name,
         "Mass": float((comps.get("physics") or {}).get("mass", 0)),
         "Size": ad.get("size", 0),
         "Grade": ad.get("grade", 0),
@@ -546,15 +562,26 @@ def _build_cargo_grid_items_from_loadout(loadout_entries, ctx):
     """
     out = []
 
-    def _walk(entries):
+    def _walk(entries, inherited_port=None):
         for entry in entries:
             entity_class, item = _resolve_entry(entry, ctx)
+            # When walking into a CargoPlate bracket, its child grid uses
+            # the outer plate's port name (Hull_A/B/C cargoplate pattern) —
+            # reference shows the mount port, not the inner "Hardpoint_Cargo".
+            pn = inherited_port or entry.get("portName")
             if item and item.get("attachDef", {}).get("type") == "CargoGrid":
-                rec = _cargo_grid_entry_from_item(entity_class, item, ctx)
+                rec = _cargo_grid_entry_from_item(
+                    entity_class, item, ctx, port_name=pn
+                )
                 if rec:
                     out.append(rec)
+                    # If this entry produced a grid, its children are the
+                    # grid sub-ports — skip them (ref doesn't double-emit).
+                    continue
+            is_plate = item and "cargoplate" in (entity_class or "").lower()
+            child_inherit = entry.get("portName") if is_plate else None
             for child in entry.get("children", []) or []:
-                _walk([child])
+                _walk([child], inherited_port=child_inherit)
 
     _walk(loadout_entries)
     return out
