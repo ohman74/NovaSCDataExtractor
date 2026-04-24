@@ -1511,6 +1511,14 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
     # type alone doesn't distinguish cargo grids, mining pods, personal
     # storage, and module swaps. Dispatch on port name.
     if has_type("cargo") or has_type("container"):
+        # Mining-ship ore pods (MOLE mining_pod_*, Prospector, ROC, Golem,
+        # Hornet F7C cargo pod) → CargoContainers in reference.
+        if "mining_pod" in pn or "ore_pod" in pn or ("pod" in pn and "cargo" in pn):
+            return "CargoContainers"
+        # "stored_pod" ports on the MOLE are empty spare slots — reference
+        # omits them entirely.
+        if "stored_pod" in pn:
+            return None
         if "mining" in pn:
             return "MiningHardpoints"
         if "cargogrid" in pn or "cargo_grid" in pn:
@@ -1754,7 +1762,7 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
             },
             "Modules": _empty_category(),
             "CargoGrids": {"InstalledItems": [], "ItemsQuantity": 0},
-            "CargoContainers": {"ItemsQuantity": 0},
+            "CargoContainers": {"InstalledItems": [], "ItemsQuantity": 0},
             "Storage": {"InstalledItems": [], "ItemsQuantity": 0},
             "WeaponsRacks": {"InstalledItems": [], "ItemsQuantity": 0},
             "Paints": _empty_category(),
@@ -1816,6 +1824,10 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
             _place(tree, category, hp)
         elif category == "Storage":
             hp = _build_storage_entry(port_name, entity_class, item_record, ctx)
+            if hp:
+                _place(tree, category, hp)
+        elif category == "CargoContainers":
+            hp = _build_cargo_container_entry(port_name, entity_class, item_record, ctx)
             if hp:
                 _place(tree, category, hp)
         elif category == "SelfDestruct":
@@ -2644,6 +2656,33 @@ def _build_simple_entry(port_name, entity_class, item_record, ctx, use_display_n
     return entry
 
 
+def _build_cargo_container_entry(port_name, entity_class, item_record, ctx):
+    """Build a CargoContainers entry (mining ore pods, Hornet F7C cargo pod).
+
+    Ref shape: {Name, Mass, Size, Grade, Capacity} — no Uneditable.
+    Capacity comes from attachDef.volume (microSCU) / 1e6.
+    """
+    if not item_record:
+        return None
+    ad = item_record.get("attachDef", {})
+    name = ctx.resolve_name(ad.get("name", ""))
+    if "PLACEHOLDER" in name or not name:
+        if entity_class:
+            name = entity_class
+        else:
+            return None
+    physics = item_record.get("components", {}).get("physics", {})
+    entry = {
+        "Name": name,
+        "Mass": float(physics.get("mass", 0) or 0),
+        "Size": ad.get("size", 1),
+        "Grade": ad.get("grade", 1),
+    }
+    if ad.get("volume"):
+        entry["Capacity"] = round(ad["volume"] / 1000000.0, 2)
+    return entry
+
+
 def _build_storage_entry(port_name, entity_class, item_record, ctx):
     """Build a storage entry.
 
@@ -2727,6 +2766,7 @@ _PLACEMENT = {
     "Flairs":               ("Components", "Flairs"),
     "Armor":                ("Components", "Armor"),
     "CargoGrids":           ("Components", "CargoGrids"),
+    "CargoContainers":      ("Components", "CargoContainers"),
 }
 
 
@@ -2872,7 +2912,7 @@ def _collapse_empty_categories(tree):
 
     # Components: CargoGrids/WeaponsRacks/Storage drop empty InstalledItems
     # (keep ItemsQuantity). Ref shape for empty containers is just {ItemsQuantity: 0}.
-    for cat in ("CargoGrids", "WeaponsRacks", "Storage"):
+    for cat in ("CargoGrids", "CargoContainers", "WeaponsRacks", "Storage"):
         block = components.get(cat)
         if not isinstance(block, dict):
             continue
