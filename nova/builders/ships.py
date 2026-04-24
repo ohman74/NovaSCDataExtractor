@@ -1390,7 +1390,8 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
     # remote-operated even with defaultWeaponGroup (Cutlass Steel tail), so
     # they stay as RemoteTurrets (handled in the has_type("turret") branch).
     if port_def.get("defaultWeaponGroup") is not None \
-            and "remote_turret" not in pn and "remoteturret" not in pn:
+            and "remote_turret" not in pn and "remoteturret" not in pn \
+            and "_remote_" not in pn:
         it_lower = (item_type or "").lower()
         if it_lower.startswith("turret.") or it_lower.startswith("weapongun."):
             return "PilotWeapons"
@@ -1399,12 +1400,11 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
     # WeaponGun.Rocket type must be matched BEFORE the WeaponGun branch
     # (bomb racks list both).
     if has_type("missilelauncher"):
-        # Storage racks on capital ships (e.g. Perseus torpedo storage) carry
-        # a MissileLauncher type but are ammo storage rather than launchers.
-        # The structural giveaway is that these ports live under `*_storage_*`
-        # port names; if a dedicated tag emerges, prefer that.
+        # Storage racks on capital ships (Perseus torpedo_storage_*) are
+        # ammo holding bays — typed MissileLauncher but reference omits
+        # them entirely (they're neither launchers nor cargo storage).
         if "torpedo_storage" in pn or "missile_storage" in pn:
-            return "Storage"
+            return None
         return "MissileRacks"
     if has_type("bomblauncher"):
         return "BombRacks"
@@ -2549,8 +2549,10 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
                 entry["PortTags"] = pt.split()
             rt = port_def.get("requiredPortTags", "")
             if rt:
-                entry["RequiredTags"] = [f"${t}" if not t.startswith("$") else t
-                                         for t in rt.split()]
+                # Preserve original tag casing and $ prefix — reference
+                # mirrors the impl XML exactly (both "VanguardNose" and
+                # "$AEGS_Idris_Nose" forms appear).
+                entry["RequiredTags"] = rt.split()
 
         # RequiredTags are taken only from the port's requiredPortTags.
         # The installed item's AttachDef.requiredTags describes what the item
