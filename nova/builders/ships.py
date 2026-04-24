@@ -578,7 +578,10 @@ def _build_cargo_grid_items_from_loadout(loadout_entries, ctx):
                     # If this entry produced a grid, its children are the
                     # grid sub-ports — skip them (ref doesn't double-emit).
                     continue
-            is_plate = item and "cargoplate" in (entity_class or "").lower()
+            is_plate = item and (
+                "cargoplate" in (entity_class or "").lower()
+                or "foldingstrut" in (entity_class or "").lower()
+            )
             child_inherit = entry.get("portName") if is_plate else None
             for child in entry.get("children", []) or []:
                 _walk([child], inherited_port=child_inherit)
