@@ -343,9 +343,13 @@ def _build_ship(class_name, record, ctx):
     # Build hardpoints from default loadout + port definitions from impl
     if default_loadout:
         impl_ports = impl.get("ports", []) if impl else []
+        ship_components_ports = components.get("ports", []) or []
+        ship_tags = (attach_def.get("tags", "") or "").split()
         ship["Hardpoints"] = _build_hardpoints(default_loadout, ctx, impl_ports,
                                                 ship.pop("_storage", []),
-                                                class_name=class_name)
+                                                class_name=class_name,
+                                                ship_components_ports=ship_components_ports,
+                                                ship_tags=ship_tags)
 
     # BaseLoadout summary (computed from hardpoints)
     base_loadout = _build_base_loadout_summary(ship.get("Hardpoints", {}), ctx)
@@ -1392,6 +1396,13 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
         # exists in the corpus.
         if "tractor" in pn:
             return "UtilityHardpoints"
+        # Remote-operated turrets (no occupant; pilot or remote crew member
+        # fires from a console). Port name is the cleanest discriminator.
+        if "remote_turret" in pn or "_remote_" in pn:
+            return "RemoteTurrets"
+        # Point Defense (PDC) turrets — small autonomous turrets on capitals.
+        if "pdc" in pn or "point_defense" in pn:
+            return "PDCTurrets"
         return "Turrets"
     # UtilityTurret (e.g. Cyclone mining cab). Falls after Turret since it
     # currently lands in MiningHardpoints by port name convention.
@@ -1623,15 +1634,35 @@ def _empty_category():
     return {"InstalledItems": [], "Hardpoints": 0}
 
 
-def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=None, class_name=""):
-    """Build the structured Hardpoints tree matching the reference format."""
+def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=None, class_name="",
+                       ship_components_ports=None, ship_tags=None):
+    """Build the structured Hardpoints tree matching the reference format.
+
+    `ship_components_ports` are the ports declared on the ship entity itself
+    (entity XML's components.ports — e.g. hardpoint_lifesupport, hardpoint_powerplant
+    on capitals). They carry the ship-internal port flags ("invisible",
+    "uneditable") that the impl XML doesn't.
+    `ship_tags` are the ship's attachDef.tags. Reference attaches these to
+    ship-internal ports' Tags field.
+    """
     # Build port lookup from vehicle impl for minSize/maxSize/types.
     # Also capture the impl's structural port order; reference sorts InstalledItems
     # by impl XML order rather than defaultLoadout order.
     port_defs = {}
     port_order = {}
+    ship_internal_ports = set()
     if impl_ports:
         _index_ports(impl_ports, port_defs, port_order)
+    # Ship's own components.ports cover internal hardpoints (lifesupport,
+    # capital-class powerplants, etc.) not present in the impl XML. Merge
+    # without overriding impl entries.
+    if ship_components_ports:
+        for p in ship_components_ports:
+            name = p.get("name", "")
+            if name and name not in port_defs:
+                port_defs[name] = p
+            if name:
+                ship_internal_ports.add(name)
 
     if port_order:
         # Sort loadout entries by their impl-XML position. Entries with no impl
@@ -1740,7 +1771,10 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
             if hp:
                 _place(tree, category, hp)
         else:
-            hp = _build_standard_entry(port_name, entity_class, item_record, children, ctx, port_def, source_entry=entry)
+            # Ship-internal ports inherit the ship's attachDef.tags as their Tags.
+            entry_parent_tags = ship_tags if (ship_tags and port_name in ship_internal_ports) else None
+            hp = _build_standard_entry(port_name, entity_class, item_record, children, ctx, port_def,
+                                        parent_tags=entry_parent_tags, source_entry=entry)
             _place(tree, category, hp)
 
             # FlightBlade also gets an IFCS entry under Controllers, with the
@@ -2257,8 +2291,15 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
             else:
                 entry["Flags"] = list(raw)
 
-        if "gimbal" in entity_class.lower() or "turret" in full_type.lower():
+        # Gimballed vs Turret: Turret.GunTurret mounts are gimbals (pilot aims,
+        # mount tracks) and get Gimballed=True. Every other Turret.* / TurretBase.*
+        # type is a proper turret (BallTurret/NoseMounted/Canard/Top/Bottom/PDC/
+        # MannedTurret/Unmanned/MissileTurret) and gets Turret=True. WeaponGun.*
+        # and Module.* mounts get neither.
+        if "gimbal" in entity_class.lower() or full_type == "Turret.GunTurret":
             entry["Gimballed"] = True
+        elif full_type.startswith("Turret.") or full_type.startswith("TurretBase."):
+            entry["Turret"] = True
 
         # PortTags from vehicle impl port definition
         if port_def:
@@ -2479,6 +2520,8 @@ _PLACEMENT = {
     # Weapons
     "PilotWeapons":         ("Weapons", "PilotWeapons"),
     "Turrets":              ("Weapons", "MannedTurrets"),  # Default; could be refined
+    "RemoteTurrets":        ("Weapons", "RemoteTurrets"),
+    "PDCTurrets":           ("Weapons", "PDCTurrets"),
     "MissileRacks":         ("Weapons", "MissileRacks"),
     "BombRacks":            ("Weapons", "BombRacks"),
     "InterdictionHardpoints": ("Weapons", "InterdictionHardpoints"),
