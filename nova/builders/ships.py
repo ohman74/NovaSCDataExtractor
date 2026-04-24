@@ -560,11 +560,16 @@ def _build_cargo_grid_items_from_loadout(loadout_entries, ctx):
     return out
 
 
-def _build_weapon_rack_entry(port_name, item_record):
+def _build_weapon_rack_entry(port_name, item_record, port_def=None):
     """Reference uses a flat shape for WeaponsRacks: per-rack {Name, Size,
     Uneditable, Ports[]} where each port is {Name, MinSize, MaxSize, Uneditable}.
     No Loadout / BaseLoadout / Types — the rack item itself is just the
     container for the FPS weapon slots that hang off it.
+
+    Uneditable on the rack itself mirrors the mounting port's uneditable flag.
+    Reference shows False for ship-loadout-declared cabinets (Valkyrie,
+    Vanguard Sentinel locker) and True for impl-defined ones. When no
+    port_def is found, default to False.
     """
     if not item_record:
         return None
@@ -573,7 +578,7 @@ def _build_weapon_rack_entry(port_name, item_record):
     out = {
         "Name": port_name,
         "Size": ad.get("size", 0),
-        "Uneditable": True,
+        "Uneditable": bool(port_def and port_def.get("uneditable")),
         "Ports": [
             {
                 "Name": p.get("name", ""),
@@ -1887,7 +1892,7 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
             if hp:
                 _place(tree, category, hp)
         elif category == "WeaponsRacks":
-            hp = _build_weapon_rack_entry(port_name, item_record)
+            hp = _build_weapon_rack_entry(port_name, item_record, port_def)
             if hp:
                 _place(tree, category, hp)
         else:
@@ -2083,10 +2088,47 @@ def _enrich_controllers(tree, loadout_entries, ctx, class_name):
             missile_data = {"MaxArmed": 0.0, "Cooldown": 0.0}
     controllers["Missiles"] = missile_data
 
-    # Weapons: from weapon_pool_sizes (WeaponGun pool)
+    # Weapons: from weapon_pool_sizes (WeaponGun pool); Modifiers from
+    # Engineering_Buff_Modifier_<ship> item's regenModifier (applies
+    # powerRatio / maxAmmoLoad / maxRegenPerSec multipliers to the pool).
     pool = ctx.weapon_pool_sizes.get(class_name.lower())
+    weapons_block = {}
     if pool:
-        controllers["Weapons"] = {"PoolSize": float(pool)}
+        weapons_block["PoolSize"] = float(pool)
+
+    # Look up the ship's engineering buff. Variants like AEGS_Idris_M share
+    # a base AEGS_Idris buff, so strip trailing _X / _XX suffixes on miss.
+    buff_candidates = [f"Engineering_Buff_Modifier_{class_name}"]
+    # Strip final underscore-separated suffix to try the base class.
+    parts = class_name.rsplit("_", 1)
+    if len(parts) == 2 and len(parts[1]) <= 4:
+        buff_candidates.append(f"Engineering_Buff_Modifier_{parts[0]}")
+    buff_item = None
+    for cand in buff_candidates:
+        buff_item = ctx.get_item(cand)
+        if buff_item:
+            break
+    if buff_item:
+        rm = (
+            buff_item.get("components", {})
+            .get("EntityComponentAttachableModifierParams", {})
+            .get("modifiers", {})
+            .get("ItemportTraversingModifiersParams", {})
+            .get("modifiers", {})
+            .get("ItemWeaponModifiersParams", {})
+            .get("weaponModifier", {})
+            .get("weaponStats", {})
+            .get("regenModifier", {})
+        )
+        if isinstance(rm, dict) and rm:
+            weapons_block["Modifiers"] = {
+                "PowerRatioMultiplier": safe_float(rm.get("powerRatioMultiplier", 1)),
+                "MaxAmmoLoadMultiplier": safe_float(rm.get("maxAmmoLoadMultiplier", 1)),
+                "MaxRegenPerSecMultiplier": safe_float(rm.get("maxRegenPerSecMultiplier", 1)),
+            }
+
+    if weapons_block:
+        controllers["Weapons"] = weapons_block
 
     # CapacitorAssignment: pull the AfterBurner GUIDs + AngVelocity curve from
     # the flight controller's IFCSParams.afterburner block. Reference always
@@ -2758,15 +2800,26 @@ def _build_cargo_container_entry(port_name, entity_class, item_record, ctx):
 def _build_storage_entry(port_name, entity_class, item_record, ctx):
     """Build a storage entry.
 
-    Returns None when the entry should be skipped entirely: either the
-    installed item can't be resolved (produces a port-name-as-Name row
-    that reference omits), or the item resolves to an @LOC_PLACEHOLDER
-    marker with no className fallback.
+    Returns None when the entry should be skipped entirely: item unresolved,
+    item resolves to @LOC_PLACEHOLDER marker, item type is Container.UNDEFINED
+    (decorative containers like sirens, door-mounts — reference only includes
+    Container.Cargo), or the item has no volume (empty mount slot).
     """
     if not item_record:
         return None
 
     ad = item_record.get("attachDef", {})
+    t = ad.get("type", "")
+    st = ad.get("subType", "")
+    full = f"{t}.{st}" if t and st else t
+    # Decorative containers (sirens, siren lights, ambient decor) are
+    # Container.UNDEFINED and reference omits them from Storage.
+    if full == "Container.UNDEFINED":
+        return None
+    # No cargo volume → empty mount slot, not real storage.
+    if not ad.get("volume"):
+        return None
+
     name = ctx.resolve_name(ad.get("name", ""))
     if "PLACEHOLDER" in name or not name:
         if entity_class:
@@ -2779,9 +2832,8 @@ def _build_storage_entry(port_name, entity_class, item_record, ctx):
         "Uneditable": True,
         "Size": ad.get("size", 0),
         "Grade": ad.get("grade", 0),
+        "Capacity": round(ad["volume"] / 1000000.0, 2),
     }
-    if ad.get("volume"):
-        entry["Capacity"] = round(ad["volume"] / 1000000.0, 2)
     return entry
 
 
