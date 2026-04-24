@@ -2228,20 +2228,15 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
             bl["Class"] = bl_class
         entry["BaseLoadout"] = bl
         # Types: from port definition (vehicle impl) if available, otherwise
-        # build from item type + child port types for comprehensive listing
+        # fall back to the item's declared type (entity XML). Reference
+        # collapses a trailing ".UNDEFINED" subtype to the base type and
+        # does NOT include the installed item's child-port types.
         if port_def and port_def.get("types"):
             entry["Types"] = port_def["types"]
+        elif full_type:
+            entry["Types"] = [full_type.split(".UNDEFINED")[0] if full_type.endswith(".UNDEFINED") else full_type]
         else:
-            types = []
-            if full_type:
-                types.append(full_type)
-            # Add child port types from the installed item's port container
-            item_ports = item_record.get("components", {}).get("ports", [])
-            for ip in item_ports:
-                for pt in ip.get("types", []):
-                    if pt not in types:
-                        types.append(pt)
-            entry["Types"] = types
+            entry["Types"] = []
 
         # Flags from port definition. Reference preserves "uneditable" in
         # the Flags list AND sets the Uneditable field; mirror both.
