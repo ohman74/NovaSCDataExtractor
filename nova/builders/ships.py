@@ -1740,7 +1740,7 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
             if hp:
                 _place(tree, category, hp)
         else:
-            hp = _build_standard_entry(port_name, entity_class, item_record, children, ctx, port_def)
+            hp = _build_standard_entry(port_name, entity_class, item_record, children, ctx, port_def, source_entry=entry)
             _place(tree, category, hp)
 
             # FlightBlade also gets an IFCS entry under Controllers, with the
@@ -1842,9 +1842,8 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
     # Collapse empty weapon categories to {} to match ref
     _collapse_empty_categories(tree)
 
-    # Loadout convention: Weapons.* uses GUID, Components.* uses className.
-    # _build_standard_entry defaults to GUID; rewrite Components subtree.
-    _rewrite_loadout_to_classname(tree.get("Components"), ctx)
+    # Loadout form (GUID vs className) is set per-entry from the source
+    # loadout XML by _build_standard_entry — no global rewrite needed.
     # Missiles and bombs (the consumable inside racks) also use className.
     # Walk Weapons.{MissileRacks,BombRacks} and rewrite leaf Loadouts whose
     # BaseLoadout.Type starts with "Missile" or "Bomb".
@@ -1885,28 +1884,6 @@ def _rewrite_missile_bomb_loadouts(node, ctx):
     elif isinstance(node, list):
         for v in node:
             _rewrite_missile_bomb_loadouts(v, ctx)
-
-
-def _rewrite_loadout_to_classname(node, ctx):
-    """Recursively replace Loadout GUIDs with className under a subtree.
-
-    Reference convention: Components.* (PowerPlants, Shields, FlightBlade,
-    Radars, etc.) carry className in Loadout, while Weapons.* carries GUID.
-    Our _build_standard_entry always emits the GUID, so for the Components
-    subtree we resolve back to className.
-    """
-    if isinstance(node, dict):
-        if "Loadout" in node and isinstance(node["Loadout"], str):
-            v = node["Loadout"]
-            if _GUID_RE.match(v):
-                resolved = ctx.resolve_guid(v)
-                if resolved:
-                    node["Loadout"] = resolved
-        for v in node.values():
-            _rewrite_loadout_to_classname(v, ctx)
-    elif isinstance(node, list):
-        for v in node:
-            _rewrite_loadout_to_classname(v, ctx)
 
 
 def _enrich_controllers(tree, loadout_entries, ctx, class_name):
@@ -2013,11 +1990,14 @@ def _enrich_radar_detection(tree, ctx):
                 "CSSensitivity": cs_sens,
                 "RSSensitivity": rs_sens,
             },
+            # GroundSensitivity is uniform across all 4 signal types in the
+            # reference — it derives from IR sensitivity + ground modifier and
+            # is replicated to EM/CS/RS, not computed per-signal.
             "GroundSensitivity": {
-                "IRSensitivity": round(ir_sens + ground_add, 4),
-                "EMSensitivity": round(em_sens + ground_add, 4),
-                "CSSensitivity": round(cs_sens + ground_add, 4),
-                "RSSensitivity": round(rs_sens + ground_add, 4),
+                "IRSensitivity": max(0.0, round(ir_sens + ground_add, 4)),
+                "EMSensitivity": max(0.0, round(ir_sens + ground_add, 4)),
+                "CSSensitivity": max(0.0, round(ir_sens + ground_add, 4)),
+                "RSSensitivity": max(0.0, round(ir_sens + ground_add, 4)),
             },
             "Piercing": {
                 "IRPiercing": ir_pierce,
@@ -2066,7 +2046,12 @@ def _enrich_shield_info(tree, loadout_entries, ctx, class_name=""):
 
 
 def _compute_storage(loadout_entries, ctx):
-    """Find storage/inventory entries by checking seat access entities."""
+    """Find storage/inventory entries by checking seat access entities.
+
+    Reference omits storage entries whose item name doesn't resolve (the
+    @LOC_PLACEHOLDER fallback) — those represent internal inventory blocks
+    not surfaced as cargo.
+    """
     storage = []
 
     def _walk(entries):
@@ -2080,8 +2065,14 @@ def _compute_storage(loadout_entries, ctx):
                     capacity = ctx.get_inventory_capacity(container_guid)
                     if capacity > 0:
                         ad = item_record.get("attachDef", {})
+                        name = ctx.resolve_name(ad.get("name", "Access"))
+                        if "PLACEHOLDER" in name:
+                            children = entry.get("children", [])
+                            if children:
+                                _walk(children)
+                            continue
                         storage.append({
-                            "Name": ctx.resolve_name(ad.get("name", "Access")),
+                            "Name": name,
                             "Mass": 0.0,
                             "Size": ad.get("size", 1),
                             "Grade": ad.get("grade", 1),
@@ -2176,8 +2167,14 @@ def _resolve_entry(entry, ctx):
     return "", None
 
 
-def _build_standard_entry(port_name, entity_class, item_record, children, ctx, port_def=None, parent_tags=None):
-    """Build a standard hardpoint entry with BaseLoadout and sub-ports."""
+def _build_standard_entry(port_name, entity_class, item_record, children, ctx, port_def=None, parent_tags=None, source_entry=None):
+    """Build a standard hardpoint entry with BaseLoadout and sub-ports.
+
+    Loadout form (GUID vs className) mirrors the source loadout XML: when the
+    entry references the item via `entityClassReference` (a GUID), Loadout
+    emits the GUID; when via `entityClassName`, Loadout emits the className.
+    Falls back to GUID when the source form is ambiguous.
+    """
     entry = {"PortName": port_name}
 
     # Tags from parent item (describes the port's capability)
@@ -2197,10 +2194,19 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
         else:
             entry["MinSize"] = size
             entry["MaxSize"] = size
-        # Loadout uses the entity's GUID (ref convention for ship hardpoints),
-        # not the className. Fall back to className if GUID unavailable.
+        # Pick Loadout form to match source. If the source loadout entry
+        # used a className (entityClassName), emit className; if it used a
+        # GUID reference (entityClassReference), emit the GUID. Default to
+        # GUID when source form is missing or only entity_class is known.
         item_guid = item_record.get("guid", "") if item_record else ""
-        entry["Loadout"] = item_guid or entity_class
+        src_class = source_entry.get("entityClassName", "") if source_entry else ""
+        src_ref = source_entry.get("entityClassReference", "") if source_entry else ""
+        if src_class and not src_ref:
+            entry["Loadout"] = src_class or entity_class
+        elif src_ref:
+            entry["Loadout"] = src_ref or item_guid or entity_class
+        else:
+            entry["Loadout"] = item_guid or entity_class
         # BaseLoadout.Class: look up via manufacturer class map (matches stditem.py)
         from .stditem import MANUFACTURER_CLASS, _COMPONENT_TYPES_CLASSED
         base_type = full_type.split(".")[0] if full_type else ""
@@ -2297,7 +2303,7 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
                 child_pn = child_port_def.get("name") if child_port_def else child_pn_loadout
                 sub = _build_standard_entry(
                     child_pn, child_class, child_record, child_children, ctx,
-                    child_port_def, parent_tags
+                    child_port_def, parent_tags, source_entry=child
                 )
                 if sub:
                     sub_items.append(sub)
@@ -2650,8 +2656,9 @@ def _collapse_empty_categories(tree):
         if not installed and not count:
             components[cat] = {}
 
-    # Components: WeaponsRacks/Storage drop empty InstalledItems (keep ItemsQuantity)
-    for cat in ("WeaponsRacks", "Storage"):
+    # Components: CargoGrids/WeaponsRacks/Storage drop empty InstalledItems
+    # (keep ItemsQuantity). Ref shape for empty containers is just {ItemsQuantity: 0}.
+    for cat in ("CargoGrids", "WeaponsRacks", "Storage"):
         block = components.get(cat)
         if not isinstance(block, dict):
             continue
