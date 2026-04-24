@@ -1747,8 +1747,16 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
 
         entity_class, item_record = _resolve_entry(entry, ctx)
 
-        # Skip entries with no resolved entity and no children
-        if not entity_class and not entry.get("children"):
+        # Skip entries with no resolved entity and no installable children.
+        # An entry may list children with empty entityClassName (e.g. Vanguard
+        # Sentinel's hardpoint_weapon_missilelauncher enumerating empty
+        # torpedo_tray_*_attach_node ports); those don't install anything and
+        # reference omits the whole rack.
+        raw_children = entry.get("children", [])
+        if not entity_class and not any(
+            c.get("entityClassName") or c.get("entityClassReference")
+            for c in raw_children
+        ):
             continue
 
         item_type = ""
@@ -1895,47 +1903,16 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
     _collapse_empty_categories(tree)
 
     # Loadout form (GUID vs className) is set per-entry from the source
-    # loadout XML by _build_standard_entry — no global rewrite needed.
-    # Missiles and bombs (the consumable inside racks) also use className.
-    # Walk Weapons.{MissileRacks,BombRacks} and rewrite leaf Loadouts whose
-    # BaseLoadout.Type starts with "Missile" or "Bomb".
-    _rewrite_missile_bomb_loadouts(tree.get("Weapons"), ctx)
+    # loadout XML by _build_standard_entry. Missile/bomb consumables inside
+    # racks follow the same source-mirroring rule — a dedicated rewrite
+    # pass used to force className here, but the reference splits this
+    # roughly 3:1 GUID:className too (309 GUID / 989 className for
+    # MissileRacks.Ports[] in entry_2.json) and the source form matches.
 
     return tree
 
 
 _GUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-
-
-def _rewrite_missile_bomb_loadouts(node, ctx):
-    """Rewrite Loadout to className for missile/bomb leaves under Weapons.
-
-    Mounts and racks themselves keep their GUID; only the consumable item
-    living inside (BaseLoadout.Type starts with "Missile" or "Bomb")
-    switches to className.
-
-    Known imprecision: a small set of bespoke ship-integrated racks
-    (e.g. ANVL_Asgard's spinal turret) keep GUID for the missiles in the
-    reference. The discriminating signal isn't obvious from the data we
-    have — Uneditable, RequiredTags, and Type all overfire when used as
-    the heuristic — so we accept ~300 known mismatches here rather than
-    introduce a worse rule.
-    """
-    if isinstance(node, dict):
-        bl = node.get("BaseLoadout")
-        if (isinstance(bl, dict)
-                and isinstance(bl.get("Type"), str)
-                and (bl["Type"].startswith("Missile") or bl["Type"].startswith("Bomb"))
-                and isinstance(node.get("Loadout"), str)
-                and _GUID_RE.match(node["Loadout"])):
-            resolved = ctx.resolve_guid(node["Loadout"])
-            if resolved:
-                node["Loadout"] = resolved
-        for v in node.values():
-            _rewrite_missile_bomb_loadouts(v, ctx)
-    elif isinstance(node, list):
-        for v in node:
-            _rewrite_missile_bomb_loadouts(v, ctx)
 
 
 def _enrich_controllers(tree, loadout_entries, ctx, class_name):
@@ -2440,6 +2417,21 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
             if item_default:
                 children = item_default
 
+        # When the parent item is a turret, reference only emits weapon-like
+        # sub-ports (the guns mounted inside). Ship loadouts often enumerate
+        # cockpit displays, seat-access panels, a Room OC port, etc. — ref
+        # filters those out. Scope the filter to turret parents so non-turret
+        # items (e.g. CrewControlled salvage mounts that DO include Display
+        # children in ref) keep their full sub-port list.
+        is_turret_parent = (
+            full_type.startswith("Turret.") or full_type.startswith("TurretBase.")
+        )
+        _WEAPON_SUB_TYPES = (
+            "WeaponGun.", "Turret.", "TurretBase.", "MissileLauncher.",
+            "GroundVehicleMissileLauncher.", "BombLauncher.", "Bomb.",
+            "WeaponMining.", "Missile.",
+        )
+
         if children:
             sub_items = []
             for child in children:
@@ -2456,6 +2448,20 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
                     if cp.get("name", "").lower() == child_pn_loadout.lower():
                         child_port_def = cp
                         break
+                # Turret filter: drop this child if none of its port types
+                # match a weapon-sub prefix. Uses the port def's declared
+                # types first; falls back to the installed item's type.
+                if is_turret_parent:
+                    child_types = list(child_port_def.get("types") or []) if child_port_def else []
+                    if not child_types and child_record:
+                        t = _full_type(child_record.get("attachDef", {}))
+                        if t:
+                            child_types = [t]
+                    if not any(
+                        any(t == p.rstrip(".") or t.startswith(p) for p in _WEAPON_SUB_TYPES)
+                        for t in child_types
+                    ):
+                        continue
                 # Reference uses the item's canonical PortName casing.
                 child_pn = child_port_def.get("name") if child_port_def else child_pn_loadout
                 sub = _build_standard_entry(
