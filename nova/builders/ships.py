@@ -1386,7 +1386,11 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
     # route to PilotWeapons even though the port's type list may also
     # include Turret / QuantumInterdictionGenerator / Module (e.g. Hornet
     # F7A_Mk2 center mount: multi-typed but pilot-fired).
-    if port_def.get("defaultWeaponGroup") is not None:
+    # Exception: ports explicitly named *remote_turret* / *remoteturret* are
+    # remote-operated even with defaultWeaponGroup (Cutlass Steel tail), so
+    # they stay as RemoteTurrets (handled in the has_type("turret") branch).
+    if port_def.get("defaultWeaponGroup") is not None \
+            and "remote_turret" not in pn and "remoteturret" not in pn:
         it_lower = (item_type or "").lower()
         if it_lower.startswith("turret.") or it_lower.startswith("weapongun."):
             return "PilotWeapons"
@@ -2816,8 +2820,14 @@ def _build_storage_entry(port_name, entity_class, item_record, ctx):
     # Container.UNDEFINED and reference omits them from Storage.
     if full == "Container.UNDEFINED":
         return None
-    # No cargo volume → empty mount slot, not real storage.
-    if not ad.get("volume"):
+    # Capacity derives from volume (microSCU). Reference omits entries whose
+    # rounded capacity is zero — those are empty mount slots on the ship
+    # body (PersonalStorage_ANVL_C8R with volume=1 microSCU, etc.). The
+    # real cargo with the matching Name appears via _compute_storage when
+    # the attached inventory container has meaningful capacity.
+    raw_vol = ad.get("volume", 0) or 0
+    capacity = round(raw_vol / 1000000.0, 2)
+    if capacity <= 0:
         return None
 
     name = ctx.resolve_name(ad.get("name", ""))
@@ -2832,7 +2842,7 @@ def _build_storage_entry(port_name, entity_class, item_record, ctx):
         "Uneditable": True,
         "Size": ad.get("size", 0),
         "Grade": ad.get("grade", 0),
-        "Capacity": round(ad["volume"] / 1000000.0, 2),
+        "Capacity": capacity,
     }
     return entry
 
