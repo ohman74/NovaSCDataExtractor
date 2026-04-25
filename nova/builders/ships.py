@@ -1454,12 +1454,28 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
         # exists in the corpus.
         if "tractor" in pn:
             return "UtilityHardpoints"
-        # Remote-operated turrets (no occupant; pilot or remote crew member
-        # fires from a console). Port name or installed item className is
-        # the cleanest discriminator.
+        # Item-className filters: items meant as decorative / non-gameplay
+        # mounts get routed away from the turret tree to match reference.
+        # Door_<...>_Cover items at TurretBase ports are blanking covers
+        # (Idris hardpoint_rear_turret_tail_cap), not actual turrets.
+        # Camera_Turret items are sensor mounts the reference omits entirely.
+        # Bomb_Turret items (Starlifter A2/M2) are likewise omitted by ref.
         item_cn_lower = ""
         if item_record:
             item_cn_lower = (item_record.get("className", "") or "").lower()
+            if (item_cn_lower.startswith("door_")
+                    or "camera_turret" in item_cn_lower
+                    or "bomb_turret" in item_cn_lower
+                    or "_turret_cap" in item_cn_lower):
+                return None
+        # AI-controlled turrets (e.g. Idris AI_Turret_Top/Bottom_*) are
+        # remote-controlled. Item className contains "_AI_Turret" and the
+        # localized name is "@item_Name_Turret_Remote".
+        if "_ai_turret" in item_cn_lower:
+            return "RemoteTurrets"
+        # Remote-operated turrets (no occupant; pilot or remote crew member
+        # fires from a console). Port name or installed item className is
+        # the cleanest discriminator.
         if ("remote_turret" in pn or "_remote_" in pn or "remoteturret" in pn
                 or "_remote_turret" in item_cn_lower or "remote_turret" in item_cn_lower):
             return "RemoteTurrets"
@@ -1486,7 +1502,8 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
         if ift in ("turretbase.unmanned", "turret.bottomturret",
                    "turret.missileturret", "turret.topturret"):
             return "RemoteTurrets"
-        if ift in ("turret.canardturret", "turret.nosemounted"):
+        if ift in ("turret.canardturret", "turret.nosemounted",
+                   "turret.ballturret"):
             return "PilotWeapons"
         return "Turrets"
     # UtilityTurret (e.g. Cyclone mining cab). Falls after Turret since it
@@ -1731,7 +1748,14 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
             return "UtilityHardpoints"
         if "turret_base" in pn or "turret_upper" in pn or "turret_lower" in pn:
             return "Turrets"
-        if "turret" in pn and "seataccess" not in pn and "controller" not in pn:
+        if ("turret" in pn and "seataccess" not in pn
+                and "controller" not in pn
+                # Relay ports use a turret-like naming convention but are
+                # comms/sensor relays (RELAY_2slot items), not gameplay
+                # hardpoints — reference omits them entirely.
+                and "relay_" not in pn
+                # Camera ports likewise (Idris hardpoint_camera_turret_*).
+                and "camera_" not in pn):
             return "Turrets"
         if (any(p in pn for p in ["gun_", "weapon_pilot", "hardpoint_weapon_"]) or pn.endswith("_weapon")) and "turret" not in pn and "rack" not in pn and "controller" not in pn:
             return "PilotWeapons"
