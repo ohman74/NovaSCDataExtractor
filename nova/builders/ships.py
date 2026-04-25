@@ -613,6 +613,18 @@ def _build_weapon_rack_entry(port_name, item_record, port_def=None):
         return None
     ad = item_record.get("attachDef", {})
     sub_ports = item_record.get("components", {}).get("ports", []) or []
+    # Filter out non-weapon-slot sub-ports: interactive button ports
+    # only (IP_Button, hardpoint_btn_*). $proxy_weapon_* slots ARE
+    # weapon mount ports (Hoplite locker, Spartan cabinet) — keep them.
+    def _keep_port(p):
+        nm = (p.get("name", "") or "").lower()
+        if not nm:
+            return False
+        if nm == "ip_button" or nm.startswith("ip_button"):
+            return False
+        if nm.startswith("hardpoint_btn_") or nm.startswith("btn_"):
+            return False
+        return True
     out = {
         "Name": port_name,
         "Size": ad.get("size", 0),
@@ -624,7 +636,7 @@ def _build_weapon_rack_entry(port_name, item_record, port_def=None):
                 "MaxSize": p.get("maxSize", 0),
                 "Uneditable": bool(p.get("uneditable")),
             }
-            for p in sub_ports
+            for p in sub_ports if _keep_port(p)
         ],
     }
     return out
