@@ -2260,18 +2260,16 @@ def _enrich_controllers(tree, loadout_entries, ctx, class_name):
         for e in entries:
             pn = e.get("portName", "").lower()
             if "controller_missile" in pn:
-                cn = e.get("entityClassName", "")
-                if cn:
-                    item = ctx.get_item(cn)
-                    if item:
-                        mc = item.get("components", {}).get("SCItemMissileControllerParams", {})
-                        if isinstance(mc, dict):
-                            ma = mc.get("maxArmedMissiles")
-                            lc = mc.get("launchCooldownTime")
-                            if ma is not None:
-                                missile_data["MaxArmed"] = float(ma)
-                            if lc is not None:
-                                missile_data["Cooldown"] = float(lc)
+                _, item = _resolve_entry(e, ctx)
+                if item:
+                    mc = item.get("components", {}).get("SCItemMissileControllerParams", {})
+                    if isinstance(mc, dict):
+                        ma = mc.get("maxArmedMissiles")
+                        lc = mc.get("launchCooldownTime")
+                        if ma is not None:
+                            missile_data["MaxArmed"] = float(ma)
+                        if lc is not None:
+                            missile_data["Cooldown"] = float(lc)
             for c in e.get("children", []):
                 _walk([c])
 
