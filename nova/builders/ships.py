@@ -2277,13 +2277,15 @@ def _enrich_controllers(tree, loadout_entries, ctx, class_name):
     if pool:
         weapons_block["PoolSize"] = float(pool)
 
-    # Look up the ship's engineering buff. Variants like AEGS_Idris_M share
-    # a base AEGS_Idris buff, so strip trailing _X / _XX suffixes on miss.
+    # Look up the ship's engineering buff. Variants share a base buff, so
+    # progressively strip trailing _X suffix tokens on miss until we find
+    # one (Cutlass_Black → Cutlass; Constellation_Andromeda → Constellation;
+    # Starfarer_Gemini → Starfarer; Idris_M → Idris).
     buff_candidates = [f"Engineering_Buff_Modifier_{class_name}"]
-    # Strip final underscore-separated suffix to try the base class.
-    parts = class_name.rsplit("_", 1)
-    if len(parts) == 2 and len(parts[1]) <= 4:
-        buff_candidates.append(f"Engineering_Buff_Modifier_{parts[0]}")
+    base = class_name
+    while "_" in base:
+        base = base.rsplit("_", 1)[0]
+        buff_candidates.append(f"Engineering_Buff_Modifier_{base}")
     buff_item = None
     for cand in buff_candidates:
         buff_item = ctx.get_item(cand)
