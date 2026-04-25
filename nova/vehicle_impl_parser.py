@@ -41,8 +41,54 @@ def parse_vehicle_implementations(cache_dir):
         except Exception as e:
             failed += 1
 
-    print(f"  Parsed {parsed} vehicle implementations ({failed} failed)")
+    # Variant overrides live in Modifications/<Variant>.xml. Each file has a
+    # <Modifications><Vehicle name="<Base>"> structure where the inner Vehicle
+    # element contains the full ports tree for the variant. The variant name
+    # comes from the filename (e.g. AEGS_Vanguard_Sentinel.xml). These need
+    # to be loaded so variant-specific port types/sizes/flags override the
+    # base vehicle's.
+    mod_dir = os.path.join(veh_dir, "Modifications")
+    if os.path.isdir(mod_dir):
+        mod_parsed = 0
+        for filename in os.listdir(mod_dir):
+            if not filename.endswith(".xml"):
+                continue
+            variant_name = os.path.splitext(filename)[0]
+            filepath = os.path.join(mod_dir, filename)
+            try:
+                data = _parse_modification_xml(filepath)
+                if data:
+                    # Carry the base name through but key by variant filename.
+                    if not data.get("name"):
+                        data["name"] = variant_name
+                    results[variant_name] = data
+                    mod_parsed += 1
+            except Exception:
+                failed += 1
+        print(f"  Parsed {parsed} vehicle implementations + {mod_parsed} variants ({failed} failed)")
+    else:
+        print(f"  Parsed {parsed} vehicle implementations ({failed} failed)")
     return results
+
+
+def _parse_modification_xml(filepath):
+    """Parse a Modifications/<Variant>.xml file.
+
+    Structure: <Modifications><Vehicle name="<base>"> ... </Vehicle></Modifications>
+    The inner Vehicle element has the same shape as a top-level vehicle XML,
+    so reuse the same Parts/PhysicalWheeled/etc. extraction logic.
+    """
+    try:
+        tree = ET.parse(filepath)
+        root = tree.getroot()
+    except ET.ParseError:
+        return None
+    if root.tag != "Modifications":
+        return None
+    veh = root.find("Vehicle")
+    if veh is None:
+        return None
+    return _extract_vehicle_data(veh)
 
 
 def _parse_vehicle_xml(filepath):
@@ -56,6 +102,11 @@ def _parse_vehicle_xml(filepath):
     if root.tag != "Vehicle":
         return None
 
+    return _extract_vehicle_data(root)
+
+
+def _extract_vehicle_data(root):
+    """Extract vehicle metadata + ports from a <Vehicle> element."""
     result = {
         "name": root.get("name", ""),
         "displayName": root.get("displayname", ""),
@@ -308,17 +359,21 @@ def get_vehicle_impl_data(vehicle_impls, vehicle_definition, class_name):
         orig = idx.get(key.lower())
         return vehicle_impls.get(orig) if orig else None
 
+    # Try by className exact match FIRST. Modifications/<Variant>.xml files
+    # supersede the base impl when present — e.g. AEGS_Vanguard_Sentinel.xml
+    # in Modifications/ overrides AEGS_Vanguard.xml's port types/sizes for
+    # the Sentinel variant. The vehicle's vehicleDefinition still points to
+    # the base file, so we have to prefer className for the lookup.
+    data = _get(class_name)
+    if data:
+        return data
+
     # Try by vehicleDefinition filename
     if vehicle_definition:
         basename = os.path.splitext(os.path.basename(vehicle_definition))[0]
         data = _get(basename)
         if data:
             return data
-
-    # Try by className exact match (case-insensitive)
-    data = _get(class_name)
-    if data:
-        return data
 
     # Try matching by removing common suffixes
     base = class_name.split("_")

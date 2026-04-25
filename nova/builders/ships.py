@@ -2698,9 +2698,16 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
         # Display, Room, ToolArm, and a handful of controller-style turrets,
         # but emits Class (often empty) for everything else. Mirror that
         # by suppressing Class only for types known to omit it.
+        # Resolve Name with fallback to className when localization is the
+        # generic "<= PLACEHOLDER =>" / @LOC_PLACEHOLDER marker (Apollo OC
+        # rooms, Retaliator OC rooms — reference uses className in this case).
+        bl_name = ctx.resolve_name(ad.get("name", ""))
+        if (bl_name == "<= PLACEHOLDER =>" or bl_name == "@LOC_PLACEHOLDER"
+                or not bl_name):
+            bl_name = entity_class
         bl = {
             "ClassName": entity_class,
-            "Name": ctx.resolve_name(ad.get("name", "")),
+            "Name": bl_name,
             "Type": full_type,
             "Size": size,
             "Grade": ad.get("grade", 0),
@@ -2761,6 +2768,13 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
                 # mirrors the impl XML exactly (both "VanguardNose" and
                 # "$AEGS_Idris_Nose" forms appear).
                 entry["RequiredTags"] = rt.split()
+        # Module entries (Apollo/Retaliator modular rooms) inherit PortTags
+        # from the installed module item's attachDef.tags when the impl-XML
+        # port itself carries no portTags. Reference shows e.g.
+        # PortTags=['AEGS_Retaliator_Module_Rear'] from the module item.
+        if (full_type.startswith("Module.")
+                and "PortTags" not in entry and ad.get("tags")):
+            entry["PortTags"] = ad["tags"].split()
 
         # RequiredTags are taken only from the port's requiredPortTags.
         # The installed item's AttachDef.requiredTags describes what the item
@@ -2780,8 +2794,12 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
         # for the weapon-inside-turret sub-port when the outer loadout entry
         # had no children. Scoped to turret-like items to avoid over-emitting
         # internal ports on non-turret items (life-support, radars, etc.).
+        # Modules (RSI_Apollo modular rooms, AEGS_Retaliator front/rear modules)
+        # follow the same pattern: ship loadout references just the module,
+        # the OC room sub-port comes from the module item's defaultLoadout.
         if not children and not is_sub_port and (
             full_type.startswith("Turret.") or full_type.startswith("TurretBase.")
+            or full_type.startswith("Module.")
         ):
             item_default = item_record.get("components", {}).get("defaultLoadout", [])
             if item_default:
