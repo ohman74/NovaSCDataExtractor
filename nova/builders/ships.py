@@ -3406,6 +3406,12 @@ def _collapse_empty_categories(tree):
         count = block.get("Hardpoints", 0)
         if not installed and not count:
             components[cat] = {}
+    # Paints entries don't carry BaseLoadout in reference — strip it.
+    paints_block = components.get("Paints")
+    if isinstance(paints_block, dict):
+        for it in paints_block.get("InstalledItems", []):
+            if isinstance(it, dict) and "BaseLoadout" in it:
+                del it["BaseLoadout"]
 
     # Components: CargoGrids/WeaponsRacks/Storage drop empty InstalledItems
     # (keep ItemsQuantity). Ref shape for empty containers is just {ItemsQuantity: 0}.
