@@ -2288,28 +2288,29 @@ def _enrich_remote_controllers(tree, loadout_entries, ctx, port_defs):
                 continue
             tag_to_seats.setdefault(tag, []).append(seat_class)
 
-    # Build the set of "controlled weapon tags" — tags that some controller
-    # port has exclusive_control over Turret/WeaponGun/etc. The reference
-    # only emits RemoteController on a weapon when an intermediate controller
-    # port exists for its tag (Idris hardpoint_controller_weapon ct=
-    # MainWeaponsControl, Cutlass hardpoint_controller_weapon ct=pilotSeat).
-    # Without this gating, ships like Spirit/Reliant_Tana/Corsair (where
-    # the seat directly controls weapons via shared tag with no intermediate)
-    # over-emit RC.
-    controlled_weapon_tags = set()
+    # Build sets of "tags controlled by a weapon controller" vs "tags
+    # controlled by a missile controller" — separate gates because the
+    # reference emits RC differently for guns vs missile racks.
+    #
+    # Weapon controller tag = some port has Turret/WeaponGun/TurretBase
+    # in its PriorityGroups (exclusive or non-exclusive). Required for
+    # PW/RT/UH RC emission.
+    #
+    # Missile controller tag = some port has MissileLauncher/BombLauncher
+    # in its PriorityGroups. MR RC requires BOTH a weapon controller AND
+    # missile controller for the tag (Hull_B/Idris/Starlancer have both;
+    # Spirit/Constellation only have missile controller and don't get RC).
+    weapon_controller_tags = set()
+    missile_controller_tags = set()
     for port_name, port_def in port_defs.items():
         if not isinstance(port_def, dict):
             continue
-        excl = port_def.get("exclusiveControl") or []
-        for it_type, tag in excl:
-            if it_type in ("Turret", "WeaponGun", "TurretBase",
-                            "MissileLauncher", "BombLauncher"):
-                controlled_weapon_tags.add(tag)
-        controlled = port_def.get("controlledTags") or []
-        for it_type, tag in controlled:
-            if it_type in ("Turret", "WeaponGun", "TurretBase",
-                            "MissileLauncher", "BombLauncher"):
-                controlled_weapon_tags.add(tag)
+        for kind in ("exclusiveControl", "controlledTags"):
+            for it_type, tag in port_def.get(kind, []) or []:
+                if it_type in ("Turret", "WeaponGun", "TurretBase"):
+                    weapon_controller_tags.add(tag)
+                elif it_type in ("MissileLauncher", "BombLauncher"):
+                    missile_controller_tags.add(tag)
 
     # Two-hop chain: weapon-port tag X -> intermediate controller port with
     # controllableTags Y AND PriorityGroup non-exclusive on tag X -> seat
@@ -2339,13 +2340,19 @@ def _enrich_remote_controllers(tree, loadout_entries, ctx, port_defs):
     if not tag_to_seats and not indirect_tag_to_seats:
         return
 
+    # Per-section gating: PW/RT/UH require weapon_controller_tags; MR
+    # requires both weapon AND missile controller tags.
+    pw_rt_gate = weapon_controller_tags
+    mr_gate = weapon_controller_tags & missile_controller_tags
+
     # Walk all weapon entries in the tree; for each, look up port_def's
-    # controllableTags and find matching seats. Currently scoped to
-    # PilotWeapons and RemoteTurrets — MissileRacks/UtilityHardpoints
-    # have a stricter REF rule (only multi-seat capital ships emit RC
-    # for missiles) that needs more analysis to derive.
+    # controllableTags and find matching seats. Includes MissileRacks/
+    # UtilityHardpoints — the controlled_weapon_tags gate keeps these
+    # to ships with intermediate controllers (Idris/Hull_B/Starlancer/
+    # Perseus etc.) where reference does emit RC.
     weapons = tree.get("Weapons", {})
-    for sect_name in ("PilotWeapons", "RemoteTurrets"):
+    for sect_name in ("PilotWeapons", "RemoteTurrets", "MissileRacks",
+                       "UtilityHardpoints"):
         sect = weapons.get(sect_name, {})
         if not isinstance(sect, dict):
             continue
@@ -2359,12 +2366,14 @@ def _enrich_remote_controllers(tree, loadout_entries, ctx, port_defs):
             tag = pd.get("controllableTags")
             if not tag:
                 continue
-            # Gate: only emit RC when the weapon's tag is also controlled by
-            # an intermediate controller port. Direct seat→weapon links
-            # without an intermediate (Spirit, Reliant_Tana, Corsair tail)
-            # don't get RC in the reference.
-            if tag not in controlled_weapon_tags:
-                continue
+            # Per-section gate: emit RC only when the weapon's tag has the
+            # appropriate intermediate controller(s).
+            if sect_name == "MissileRacks":
+                if tag not in mr_gate:
+                    continue
+            else:
+                if tag not in pw_rt_gate:
+                    continue
             seats = tag_to_seats.get(tag) or indirect_tag_to_seats.get(tag)
             if not seats:
                 continue
