@@ -270,7 +270,8 @@ def _parse_parts_recursive(part_elem):
                 if port:
                     port["partName"] = part_name
                     ports.append(port)
-            elif part_class in ("Animated", "Static", "SubPart", "Mass", "Light", ""):
+            elif part_class in ("Animated", "AnimatedJoint", "Static",
+                                "SubPart", "Mass", "Light", ""):
                 # Recurse into container parts
                 sub_ports = _parse_parts_recursive(child)
                 ports.extend(sub_ports)
@@ -357,25 +358,39 @@ def _parse_item_port(part_elem):
         # PriorityGroups specify which item types + tags this port (when
         # occupied as a seat) exclusively controls. Used to map weapon
         # ports' controllableTags back to seat ports.
-        ud = cd.find("UserDef")
-        if ud is not None:
-            pg_root = ud.find("PriorityGroups")
-            if pg_root is not None:
-                excl = []
-                for pg in pg_root:
-                    it_type = pg.get("itemType")
-                    if not it_type:
+        # Captures both <UserDef> (seat-occupier-side) and <UsableDef>
+        # (controller-port-side) PriorityGroups — both follow the same
+        # itemType/tags/Priority shape.
+        excl = []
+        controlled_tags = []
+        for parent_def in (cd.find("UserDef"), cd.find("UsableDef")):
+            if parent_def is None:
+                continue
+            pg_root = parent_def.find("PriorityGroups")
+            if pg_root is None:
+                continue
+            for pg in pg_root:
+                it_type = pg.get("itemType")
+                if not it_type:
+                    continue
+                for tags_elem in pg:
+                    if tags_elem.tag != "tags":
                         continue
-                    for tags_elem in pg:
-                        if tags_elem.tag != "tags":
-                            continue
-                        tag = tags_elem.get("tag")
-                        pri = tags_elem.find("Priority")
-                        pri_v = pri.get("value") if pri is not None else None
-                        if tag and pri_v == "exclusive_control":
-                            excl.append((it_type, tag))
-                if excl:
-                    port["exclusiveControl"] = excl
+                    tag = tags_elem.get("tag")
+                    pri = tags_elem.find("Priority")
+                    pri_v = pri.get("value") if pri is not None else None
+                    if not tag:
+                        continue
+                    if pri_v == "exclusive_control":
+                        excl.append((it_type, tag))
+                    elif pri_v and pri_v not in ("no_control", "observe_only"):
+                        # Numeric priority or other — controller has
+                        # non-exclusive control over this tag.
+                        controlled_tags.append((it_type, tag))
+        if excl:
+            port["exclusiveControl"] = excl
+        if controlled_tags:
+            port["controlledTags"] = controlled_tags
 
     return port
 

@@ -2288,7 +2288,32 @@ def _enrich_remote_controllers(tree, loadout_entries, ctx, port_defs):
                 continue
             tag_to_seats.setdefault(tag, []).append(seat_class)
 
-    if not tag_to_seats:
+    # Two-hop chain: weapon-port tag X -> intermediate controller port with
+    # controllableTags Y AND PriorityGroup non-exclusive on tag X -> seat
+    # with exclusive_control on Y. Hornet F7CM gun_center: gun tag=
+    # turret_center → controller port (controllableTags=weapon_controller_
+    # copilot, PG Turret tag=turret_center) → copilot seat exclusive on
+    # weapon_controller_copilot.
+    indirect_tag_to_seats = {}
+    for port_name, port_def in port_defs.items():
+        if not isinstance(port_def, dict):
+            continue
+        ctags = port_def.get("controllableTags")
+        controlled = port_def.get("controlledTags") or []
+        if not ctags or not controlled:
+            continue
+        # The seat that controls this controller port:
+        downstream_seats = tag_to_seats.get(ctags) or []
+        if not downstream_seats:
+            continue
+        for it_type, tag in controlled:
+            if it_type not in ("Turret", "WeaponGun", "TurretBase",
+                                "MissileLauncher", "BombLauncher"):
+                continue
+            indirect_tag_to_seats.setdefault(tag, []).extend(downstream_seats)
+
+    # Merge: prefer direct match; fall back to indirect.
+    if not tag_to_seats and not indirect_tag_to_seats:
         return
 
     # Walk all weapon entries in the tree; for each, look up port_def's
@@ -2311,12 +2336,19 @@ def _enrich_remote_controllers(tree, loadout_entries, ctx, port_defs):
             tag = pd.get("controllableTags")
             if not tag:
                 continue
-            seats = tag_to_seats.get(tag)
+            seats = tag_to_seats.get(tag) or indirect_tag_to_seats.get(tag)
             if not seats:
                 continue
+            # Dedupe while preserving order
+            seen = set()
+            unique_seats = []
+            for s in seats:
+                if s not in seen:
+                    seen.add(s)
+                    unique_seats.append(s)
             item["RemoteController"] = {
                 "Slaved": False,
-                "Seats": list(seats),
+                "Seats": unique_seats,
             }
 
 
@@ -2715,10 +2747,18 @@ def _add_impl_only_ports(tree, impl_ports, loadout_port_names):
     single hardpoint_weapon_rack visible in reference. Multi-port
     weapon_locker patterns (Idris) are omitted from reference.
     """
+    emitted_names = set()
+
     def _emit(port):
         pname = port.get("name", "")
         if not pname or pname in loadout_port_names:
             return
+        # Dedupe: impl XML can declare the same port name at multiple
+        # hierarchy levels (e.g. Cutlass hardpoint_weapon_rack appears
+        # twice). REF emits only one entry per unique port name.
+        if pname in emitted_names:
+            return
+        emitted_names.add(pname)
         item_type = port["types"][0] if port.get("types") else ""
         category = _classify_port(pname, item_type, port)
         if category == "Paints":
