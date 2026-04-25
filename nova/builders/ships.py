@@ -482,19 +482,25 @@ def _build_cargo_grid_items_by_name(class_name, ctx):
         ad = item.get("attachDef", {})
         if ad.get("type") != "CargoGrid":
             continue
-        entry = _cargo_grid_entry_from_item(cn, item, ctx)
+        # By-name fallback ships (Intrepid/UTV/Syulen/Fortune/Salvation/etc.)
+        # consistently omit Uneditable in reference; mirror that.
+        entry = _cargo_grid_entry_from_item(cn, item, ctx, emit_uneditable=False)
         if entry:
             out.append(entry)
     out.sort(key=lambda x: x["Name"])
     return out
 
 
-def _cargo_grid_entry_from_item(class_name, item, ctx, port_name=None):
+def _cargo_grid_entry_from_item(class_name, item, ctx, port_name=None,
+                                  emit_uneditable=True):
     """Render a single CargoGrid InstalledItems entry from a resolved item record.
 
     Name: uses the item className when it contains "_CargoGrid_" (e.g.
     AEGS_Reclaimer_CargoGrid_Small). Falls back to the port name when the
     item is a generic plate (MISC_Hull_A_CargoPlate → hardpoint_cargoplate_*).
+
+    `emit_uneditable=False` skips the Uneditable field — used by the
+    by-name-prefix fallback path where reference omits the field.
     """
     ad = item.get("attachDef", {})
     comps = item.get("components", {})
@@ -541,15 +547,17 @@ def _cargo_grid_entry_from_item(class_name, item, ctx, port_name=None):
         if "cargoplate" in low_pn or "cargo_strut" in low_pn:
             name = port_name
 
-    return {
+    out = {
         "Name": name,
         "Mass": float((comps.get("physics") or {}).get("mass", 0)),
         "Size": ad.get("size", 0),
         "Grade": ad.get("grade", 0),
         "Capacity": float(inv.get("capacity", 0)),
         "GridProperties": grid_props,
-        "Uneditable": True,
     }
+    if emit_uneditable:
+        out["Uneditable"] = True
+    return out
 
 
 def _build_cargo_grid_items_from_loadout(loadout_entries, ctx):
@@ -1612,7 +1620,7 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
         return "FlightBlade"
     if has_type("paints"):
         return "Paints"
-    if has_type("flair_cockpit"):
+    if has_type("flair_cockpit") or has_type("flair_surface") or has_type("flair"):
         return "Flairs"
 
     # Salvage family — structural types are several variants.
@@ -2557,6 +2565,26 @@ def _add_impl_only_ports(tree, impl_ports, loadout_port_names):
                   "MinSize": port.get("minSize", 0), "MaxSize": port.get("maxSize", 0),
                   "Types": port.get("types", [])}
             _place(tree, category, hp)
+        elif category == "Flairs" and port.get("types"):
+            # Impl-only flair ports (300i hardpoint_custom_*, MOTH hanging,
+            # Perseus captains_flair). Skip ports with no types — those are
+            # decorative anchors, not customizable flair slots.
+            hp = {"PortName": pname,
+                  "MinSize": port.get("minSize", 0), "MaxSize": port.get("maxSize", 0),
+                  "Types": port.get("types", [])}
+            rt = port.get("requiredPortTags", "")
+            if rt:
+                hp["RequiredTags"] = rt.split()
+            pt = port.get("portTags", "")
+            if pt:
+                hp["PortTags"] = pt.split()
+            flags_raw = port.get("flags")
+            if isinstance(flags_raw, list) and flags_raw:
+                hp["Flags"] = list(flags_raw)
+            elif isinstance(flags_raw, str) and flags_raw:
+                hp["Flags"] = [f for f in flags_raw.split() if f]
+            hp["Uneditable"] = port.get("uneditable", False)
+            _place(tree, category, hp)
         elif category == "WeaponsRacks" and pname.lower() == "hardpoint_weapon_rack":
             # Only the bare singular hardpoint_weapon_rack port pattern.
             hp = {
@@ -2750,12 +2778,17 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
         # TurretBase.* types (BallTurret/NoseMounted/Canard/Top/Bottom/PDC/
         # MannedTurret/Unmanned/MissileTurret) -> Turret:true. WeaponGun.*
         # mounts are direct weapon hardpoints with no gimbal -> Fixed:true.
-        if "gimbal" in entity_class.lower() or full_type == "Turret.GunTurret":
-            entry["Gimballed"] = True
-        elif full_type.startswith("Turret.") or full_type.startswith("TurretBase."):
-            entry["Turret"] = True
-        elif full_type.startswith("WeaponGun.") and not is_sub_port:
-            entry["Fixed"] = True
+        # Tractor-beam mounts (UtilityHardpoints) skip these flags entirely
+        # in the reference even though they're typed Turret.GunTurret.
+        is_tractor = ("tractor" in port_name.lower()
+                      or "tractor" in (entity_class or "").lower())
+        if not is_tractor:
+            if "gimbal" in entity_class.lower() or full_type == "Turret.GunTurret":
+                entry["Gimballed"] = True
+            elif full_type.startswith("Turret.") or full_type.startswith("TurretBase."):
+                entry["Turret"] = True
+            elif full_type.startswith("WeaponGun.") and not is_sub_port:
+                entry["Fixed"] = True
 
         # PortTags from vehicle impl port definition
         if port_def:
