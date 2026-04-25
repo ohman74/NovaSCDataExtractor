@@ -2271,22 +2271,24 @@ def _enrich_remote_controllers(tree, loadout_entries, ctx, port_defs):
     # Build tag → list of seat item classNames. For each port_def with
     # exclusiveControl entries, find the matching seat in loadout.
     tag_to_seats = {}
+    # Track numeric-priority candidates as a fallback when no seat has
+    # exclusive_control on the tag. Map tag → list of (priority, seat_class).
+    tag_to_prio_seats = {}
     for port_name, port_def in port_defs.items():
         if not isinstance(port_def, dict):
-            continue
-        excl = port_def.get("exclusiveControl") or []
-        if not excl:
             continue
         seat_class = port_to_item.get(port_name.lower())
         if not seat_class:
             continue
-        for it_type, tag in excl:
+        for it_type, tag in port_def.get("exclusiveControl") or []:
             # We care about WeaponController and MissileController for now;
             # other types (EnergyController, FlightController, etc.) aren't
             # used by the RC.Seats mapping.
             if it_type not in ("WeaponController", "MissileController"):
                 continue
             tag_to_seats.setdefault(tag, []).append(seat_class)
+        for it_type, tag, prio in port_def.get("priorityControllers") or []:
+            tag_to_prio_seats.setdefault(tag, []).append((prio, seat_class))
 
     # Build sets of "tags controlled by a weapon controller" vs "tags
     # controlled by a missile controller" — separate gates because the
@@ -2381,7 +2383,15 @@ def _enrich_remote_controllers(tree, loadout_entries, ctx, port_defs):
                     continue
             seats = tag_to_seats.get(tag) or indirect_tag_to_seats.get(tag)
             if not seats:
-                continue
+                # Fallback: numeric-priority seats. Reclaimer pilot has
+                # priority 50 on TurretConsole01 vs console_01 priority 100.
+                # REF picks the lowest-priority seat.
+                prio = tag_to_prio_seats.get(tag)
+                if prio:
+                    prio_sorted = sorted(prio, key=lambda x: x[0])
+                    seats = [prio_sorted[0][1]]
+                else:
+                    continue
             # Dedupe while preserving order
             seen = set()
             unique_seats = []

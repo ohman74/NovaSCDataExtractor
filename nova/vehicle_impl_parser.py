@@ -392,6 +392,39 @@ def _parse_item_port(part_elem):
         if controlled_tags:
             port["controlledTags"] = controlled_tags
 
+        # Numeric-priority WeaponController/MissileController PG entries on
+        # SEAT ports (UserDef). Reclaimer pilot has priority "50" on
+        # TurretConsole01 (vs console_01 priority "100"); REF picks pilot
+        # (lower number wins). Used as a tie-breaker for RC seat selection
+        # when no port has exclusive_control on the tag.
+        prio_controllers = []
+        ud = cd.find("UserDef")
+        if ud is not None:
+            pg_root = ud.find("PriorityGroups")
+            if pg_root is not None:
+                for pg in pg_root:
+                    it_type = pg.get("itemType")
+                    if it_type not in ("WeaponController", "MissileController"):
+                        continue
+                    for tags_elem in pg:
+                        if tags_elem.tag != "tags":
+                            continue
+                        tag = tags_elem.get("tag")
+                        pri = tags_elem.find("Priority")
+                        pri_v = pri.get("value") if pri is not None else None
+                        if not tag or not pri_v:
+                            continue
+                        if pri_v in ("exclusive_control", "no_control",
+                                      "observe_only"):
+                            continue
+                        try:
+                            prio_int = int(pri_v)
+                        except ValueError:
+                            continue
+                        prio_controllers.append((it_type, tag, prio_int))
+        if prio_controllers:
+            port["priorityControllers"] = prio_controllers
+
     return port
 
 
