@@ -1977,6 +1977,24 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
         },
     }
 
+    # Promote weapon-bearing children of AttachedPart wing-tip items
+    # (Merlin/Archimedes hardpoint_wing_left/right) to the top-level
+    # loadout list before classifying. The wing item itself doesn't
+    # classify (AttachedPart isn't a hardpoint category) but its child
+    # weapon mount IS a top-level PilotWeapons hardpoint per reference.
+    extra_promoted = []
+    for _e in loadout_entries:
+        _ec, _ir = _resolve_entry(_e, ctx)
+        if not _ir:
+            continue
+        _ad = _ir.get("attachDef", {})
+        if _ad.get("type") == "AttachedPart":
+            for _c in _e.get("children", []) or []:
+                if _c.get("entityClassName") or _c.get("entityClassReference"):
+                    extra_promoted.append(_c)
+    if extra_promoted:
+        loadout_entries = list(loadout_entries) + extra_promoted
+
     for entry in loadout_entries:
         port_name = entry.get("portName", "")
         if not port_name:
