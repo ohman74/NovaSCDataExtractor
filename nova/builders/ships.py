@@ -2400,32 +2400,38 @@ def _compute_storage(loadout_entries, ctx):
 
 
 def _add_impl_only_ports(tree, impl_ports, loadout_port_names):
-    """Add ports from vehicle impl that aren't in the loadout (paints, etc.).
+    """Add ports from vehicle impl that aren't in the loadout.
 
-    Storage slots with no loadout entry are unequipped mount points rather
-    than real cargo; reference omits them. Only Paints carry through.
+    Only Paints emit unconditionally. Bare WeaponsRacks (impl-defined
+    weapon_rack ports without loadout items, single port per ship) emit
+    a minimal entry — Ballista, Cutlass Black/Blue, ORIG_350r have a
+    single hardpoint_weapon_rack visible in reference. Multi-port
+    weapon_locker patterns (Idris) are omitted from reference.
     """
-    for port in impl_ports:
+    def _emit(port):
         pname = port.get("name", "")
-        if pname and pname not in loadout_port_names:
-            item_type = port["types"][0] if port.get("types") else ""
-            category = _classify_port(pname, item_type, port)
-            if category == "Paints":
-                hp = {"PortName": pname, "Uneditable": port.get("uneditable", False),
-                      "MinSize": port.get("minSize", 0), "MaxSize": port.get("maxSize", 0),
-                      "Types": port.get("types", [])}
-                _place(tree, category, hp)
-        # Recurse into sub-ports
+        if not pname or pname in loadout_port_names:
+            return
+        item_type = port["types"][0] if port.get("types") else ""
+        category = _classify_port(pname, item_type, port)
+        if category == "Paints":
+            hp = {"PortName": pname, "Uneditable": port.get("uneditable", False),
+                  "MinSize": port.get("minSize", 0), "MaxSize": port.get("maxSize", 0),
+                  "Types": port.get("types", [])}
+            _place(tree, category, hp)
+        elif category == "WeaponsRacks" and pname.lower() == "hardpoint_weapon_rack":
+            # Only the bare singular hardpoint_weapon_rack port pattern.
+            hp = {
+                "Name": pname,
+                "Size": port.get("maxSize", port.get("minSize", 1)),
+                "Uneditable": port.get("uneditable", False),
+            }
+            _place(tree, category, hp)
+
+    for port in impl_ports:
+        _emit(port)
         for sub in port.get("subPorts", []):
-            sub_name = sub.get("name", "")
-            if sub_name and sub_name not in loadout_port_names:
-                item_type = sub["types"][0] if sub.get("types") else ""
-                category = _classify_port(sub_name, item_type, sub)
-                if category == "Paints":
-                    hp = {"PortName": sub_name, "Uneditable": sub.get("uneditable", False),
-                          "MinSize": sub.get("minSize", 0), "MaxSize": sub.get("maxSize", 0),
-                          "Types": sub.get("types", [])}
-                    _place(tree, category, hp)
+            _emit(sub)
 
 
 def _index_ports(impl_ports, port_defs, order_index=None, _depth=0):
@@ -2508,10 +2514,19 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
         full_type = _full_type(ad)
         mfr = ctx.get_manufacturer(ad.get("manufacturerGuid", ""))
 
-        # Use port definition from vehicle impl for size/types if available
+        # Use port definition from vehicle impl for size/types if available.
+        # For installed missile/bomb racks, clamp MaxSize to the item's
+        # actual size — Hornet F7C_Mk2-style port defs accept range 3-4
+        # but reference reports MaxSize=3 when a size-3 rack is installed.
         if port_def:
-            entry["MinSize"] = port_def.get("minSize", size)
-            entry["MaxSize"] = port_def.get("maxSize", size)
+            pmin = port_def.get("minSize", size)
+            pmax = port_def.get("maxSize", size)
+            entry["MinSize"] = pmin
+            if (full_type == "MissileLauncher.MissileRack"
+                    or full_type == "BombLauncher.BombRack") and size:
+                entry["MaxSize"] = min(pmax, size)
+            else:
+                entry["MaxSize"] = pmax
         else:
             entry["MinSize"] = size
             entry["MaxSize"] = size
