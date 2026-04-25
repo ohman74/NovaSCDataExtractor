@@ -3226,6 +3226,15 @@ def _place(tree, category, entry):
             sub_key = "EMP"
         elif "QuantumInterdictionGenerator" in item_type or "QED" in item_type:
             sub_key = "QED"
+        else:
+            # Fallback: port-name based routing for items typed Misc/etc.
+            # MRAI_Guardian hardpoint_quantum_damp installs a Misc.UNDEFINED
+            # mohawk piece that the reference still categorizes under QED.
+            pn = (entry.get("PortName", "") or "").lower()
+            if "quantum_damp" in pn or "qed" in pn or "interdiction" in pn:
+                sub_key = "QED"
+            elif "emp" in pn:
+                sub_key = "EMP"
     elif category in ("MiningHardpoints", "SalvageHardpoints"):
         item_type = entry.get("BaseLoadout", {}).get("Type", "") or ""
         # ToolArm.* → PilotControlled (pilot operates from cockpit)
