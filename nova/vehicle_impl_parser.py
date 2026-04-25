@@ -74,9 +74,13 @@ def parse_vehicle_implementations(cache_dir):
 def _parse_modification_xml(filepath):
     """Parse a Modifications/<Variant>.xml file.
 
-    Structure: <Modifications><Vehicle name="<base>"> ... </Vehicle></Modifications>
-    The inner Vehicle element has the same shape as a top-level vehicle XML,
-    so reuse the same Parts/PhysicalWheeled/etc. extraction logic.
+    Two structures occur:
+    - <Modifications><Vehicle name="<base>"> ... </Vehicle></Modifications>
+      Full vehicle override (e.g. AEGS_Vanguard_Sentinel) — parse via the
+      shared _extract_vehicle_data on the inner Vehicle element.
+    - <Modifications><Parts> ... </Parts></Modifications>
+      Parts-only override (e.g. ANVL_Hornet_F7CM, ORIG_350r) — parse the
+      Parts tree directly to extract this variant's port hierarchy.
     """
     try:
         tree = ET.parse(filepath)
@@ -86,9 +90,20 @@ def _parse_modification_xml(filepath):
     if root.tag != "Modifications":
         return None
     veh = root.find("Vehicle")
-    if veh is None:
+    if veh is not None:
+        return _extract_vehicle_data(veh)
+    parts_elem = root.find("Parts")
+    if parts_elem is None:
         return None
-    return _extract_vehicle_data(veh)
+    main_part = parts_elem.find("Part")
+    if main_part is None:
+        return None
+    return {
+        "name": "",
+        "ports": _parse_parts_recursive(main_part),
+        "mass": _sum_structural_mass(main_part),
+        "hullHP": _collect_hull_hp(main_part),
+    }
 
 
 def _parse_vehicle_xml(filepath):
