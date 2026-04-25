@@ -2882,6 +2882,18 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
         if (full_type.startswith("Module.")
                 and "PortTags" not in entry and ad.get("tags")):
             entry["PortTags"] = ad["tags"].split()
+        # FlightController (FlightBlade) entries: variants share the base
+        # vehicle's impl XML, which carries the BASE ship's portTags
+        # (e.g. ANVL_Pisces_Base_Blade). Reference uses the installed
+        # item's attachDef.tags instead (ANVL_Pisces_C8R_Blade etc.).
+        # Override with item tags whenever the item has a tag.
+        if full_type == "FlightController.UNDEFINED" and ad.get("tags"):
+            entry["PortTags"] = ad["tags"].split()
+            # Mirror RequiredTags too — variant impl_only port uses base.
+            req = ad.get("requiredTags", "")
+            if req:
+                entry["RequiredTags"] = ["$" + t if not t.startswith("$") else t
+                                          for t in req.split()]
 
         # RequiredTags are taken only from the port's requiredPortTags.
         # The installed item's AttachDef.requiredTags describes what the item
