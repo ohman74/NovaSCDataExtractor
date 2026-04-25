@@ -2546,10 +2546,21 @@ def _compute_storage(loadout_entries, ctx, impl=None):
                         ad = item_record.get("attachDef", {})
                         name = ctx.resolve_name(ad.get("name", "Access"))
                         if "PLACEHOLDER" in name:
-                            children = entry.get("children", [])
-                            if children:
-                                _walk(children)
-                            continue
+                            # Reference falls back to className for the few
+                            # PLACEHOLDER-named SeatAccess items that DO have
+                            # an inventory container (ARGO_MPUV_1T, XNAA,
+                            # XIAN_Scout, TMBL_Cyclone copilot). For other
+                            # types (CargoGrid items keyed off PLACEHOLDER)
+                            # this is wrong — keep the original walk-children
+                            # fallback.
+                            ad_type = ad.get("type", "")
+                            if ad_type == "SeatAccess" and entity_class:
+                                name = entity_class
+                            else:
+                                children = entry.get("children", [])
+                                if children:
+                                    _walk(children)
+                                continue
                         port_name = (entry.get("portName") or "").lower()
                         # Skip storage entries hung off Door-typed impl ports
                         # (Hawk/Hurricane/Guardian hardpoint_personal_storage):
