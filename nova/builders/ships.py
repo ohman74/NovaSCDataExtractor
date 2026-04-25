@@ -1449,9 +1449,18 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
     if port_def.get("defaultWeaponGroup") is not None \
             and "remote_turret" not in pn and "remoteturret" not in pn \
             and "_remote_" not in pn:
-        it_lower = (item_type or "").lower()
-        if it_lower.startswith("turret.") or it_lower.startswith("weapongun."):
-            return "PilotWeapons"
+        # Skip if item className is a remote turret (Ballista hardpoint_turret
+        # has dwg=1 but installs ANVL_Ballista_Remote_Top_Turret) — fall
+        # through to the turret branch which routes by item className.
+        item_cn_lower = ""
+        if item_record:
+            item_cn_lower = (item_record.get("className", "") or "").lower()
+        is_remote_item = ("_remote" in item_cn_lower
+                           and "_turret" in item_cn_lower)
+        if not is_remote_item:
+            it_lower = (item_type or "").lower()
+            if it_lower.startswith("turret.") or it_lower.startswith("weapongun."):
+                return "PilotWeapons"
 
     # Weapons and weapon-like mounts. Missile/bomb racks that also carry a
     # WeaponGun.Rocket type must be matched BEFORE the WeaponGun branch
