@@ -2177,6 +2177,10 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
     # Enrich Controllers sub-blocks (Missiles, Weapons, Wheeled)
     _enrich_controllers(tree, loadout_entries, ctx, class_name)
 
+    # RemoteController.Seats: wire weapon entries to operator seats based on
+    # impl-XML ControllerDef.controllableTags / PriorityGroups.
+    _enrich_remote_controllers(tree, loadout_entries, ctx, port_defs)
+
     # TotalFuelIntakeRate on FuelIntakes block
     fi_block = tree.get("Components", {}).get("Systems", {}).get("FuelIntakes", {})
     if isinstance(fi_block, dict):
@@ -2231,6 +2235,89 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
 
 
 _GUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _enrich_remote_controllers(tree, loadout_entries, ctx, port_defs):
+    """Populate RemoteController.Seats on weapon entries.
+
+    Algorithm:
+    1. Build seat-tag → list-of-seat-itemClassNames map. Each seat port's
+       impl-XML PriorityGroup with WeaponController/MissileController +
+       exclusive_control on tag X means "this seat exclusively controls
+       items with tag X".
+    2. For each weapon entry (PilotWeapons/RemoteTurrets/MissileRacks/
+       UtilityHardpoints), look up its impl-XML port's controllableTags.
+       If a seat exclusively controls that tag, set RemoteController.Seats
+       to that seat's installed-item className.
+
+    Slaved is left as False (default) — REF distribution is mixed and the
+    discriminator isn't fully understood.
+    """
+    # Build a port_name → installed-item-className map from the loadout.
+    port_to_item = {}
+
+    def _walk_loadout(entries):
+        for entry in entries:
+            pn = entry.get("portName", "")
+            if pn:
+                ec, _ = _resolve_entry(entry, ctx)
+                if ec:
+                    port_to_item[pn.lower()] = ec
+            for c in entry.get("children", []) or []:
+                _walk_loadout([c])
+
+    _walk_loadout(loadout_entries)
+
+    # Build tag → list of seat item classNames. For each port_def with
+    # exclusiveControl entries, find the matching seat in loadout.
+    tag_to_seats = {}
+    for port_name, port_def in port_defs.items():
+        if not isinstance(port_def, dict):
+            continue
+        excl = port_def.get("exclusiveControl") or []
+        if not excl:
+            continue
+        seat_class = port_to_item.get(port_name.lower())
+        if not seat_class:
+            continue
+        for it_type, tag in excl:
+            # We care about WeaponController and MissileController for now;
+            # other types (EnergyController, FlightController, etc.) aren't
+            # used by the RC.Seats mapping.
+            if it_type not in ("WeaponController", "MissileController"):
+                continue
+            tag_to_seats.setdefault(tag, []).append(seat_class)
+
+    if not tag_to_seats:
+        return
+
+    # Walk all weapon entries in the tree; for each, look up port_def's
+    # controllableTags and find matching seats. Currently scoped to
+    # PilotWeapons and RemoteTurrets — MissileRacks/UtilityHardpoints
+    # have a stricter REF rule (only multi-seat capital ships emit RC
+    # for missiles) that needs more analysis to derive.
+    weapons = tree.get("Weapons", {})
+    for sect_name in ("PilotWeapons", "RemoteTurrets"):
+        sect = weapons.get(sect_name, {})
+        if not isinstance(sect, dict):
+            continue
+        for item in sect.get("InstalledItems", []) or []:
+            pn = item.get("PortName", "")
+            if not pn:
+                continue
+            pd = port_defs.get(pn) or port_defs.get(pn.lower())
+            if not pd:
+                continue
+            tag = pd.get("controllableTags")
+            if not tag:
+                continue
+            seats = tag_to_seats.get(tag)
+            if not seats:
+                continue
+            item["RemoteController"] = {
+                "Slaved": False,
+                "Seats": list(seats),
+            }
 
 
 def _enrich_controllers(tree, loadout_entries, ctx, class_name):

@@ -347,6 +347,36 @@ def _parse_item_port(part_elem):
                 types.append(f"{t}.{st}" if st else t)
         port["types"] = types
 
+    # ControllerDef.controllableTags + PriorityGroups (used to wire weapon
+    # ports to operator seats for the RemoteController.Seats field).
+    cd = ip_elem.find("ControllerDef")
+    if cd is not None:
+        controllable = cd.get("controllableTags") or ""
+        if controllable:
+            port["controllableTags"] = controllable
+        # PriorityGroups specify which item types + tags this port (when
+        # occupied as a seat) exclusively controls. Used to map weapon
+        # ports' controllableTags back to seat ports.
+        ud = cd.find("UserDef")
+        if ud is not None:
+            pg_root = ud.find("PriorityGroups")
+            if pg_root is not None:
+                excl = []
+                for pg in pg_root:
+                    it_type = pg.get("itemType")
+                    if not it_type:
+                        continue
+                    for tags_elem in pg:
+                        if tags_elem.tag != "tags":
+                            continue
+                        tag = tags_elem.get("tag")
+                        pri = tags_elem.find("Priority")
+                        pri_v = pri.get("value") if pri is not None else None
+                        if tag and pri_v == "exclusive_control":
+                            excl.append((it_type, tag))
+                if excl:
+                    port["exclusiveControl"] = excl
+
     return port
 
 
