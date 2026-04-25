@@ -2288,6 +2288,29 @@ def _enrich_remote_controllers(tree, loadout_entries, ctx, port_defs):
                 continue
             tag_to_seats.setdefault(tag, []).append(seat_class)
 
+    # Build the set of "controlled weapon tags" — tags that some controller
+    # port has exclusive_control over Turret/WeaponGun/etc. The reference
+    # only emits RemoteController on a weapon when an intermediate controller
+    # port exists for its tag (Idris hardpoint_controller_weapon ct=
+    # MainWeaponsControl, Cutlass hardpoint_controller_weapon ct=pilotSeat).
+    # Without this gating, ships like Spirit/Reliant_Tana/Corsair (where
+    # the seat directly controls weapons via shared tag with no intermediate)
+    # over-emit RC.
+    controlled_weapon_tags = set()
+    for port_name, port_def in port_defs.items():
+        if not isinstance(port_def, dict):
+            continue
+        excl = port_def.get("exclusiveControl") or []
+        for it_type, tag in excl:
+            if it_type in ("Turret", "WeaponGun", "TurretBase",
+                            "MissileLauncher", "BombLauncher"):
+                controlled_weapon_tags.add(tag)
+        controlled = port_def.get("controlledTags") or []
+        for it_type, tag in controlled:
+            if it_type in ("Turret", "WeaponGun", "TurretBase",
+                            "MissileLauncher", "BombLauncher"):
+                controlled_weapon_tags.add(tag)
+
     # Two-hop chain: weapon-port tag X -> intermediate controller port with
     # controllableTags Y AND PriorityGroup non-exclusive on tag X -> seat
     # with exclusive_control on Y. Hornet F7CM gun_center: gun tag=
@@ -2335,6 +2358,12 @@ def _enrich_remote_controllers(tree, loadout_entries, ctx, port_defs):
                 continue
             tag = pd.get("controllableTags")
             if not tag:
+                continue
+            # Gate: only emit RC when the weapon's tag is also controlled by
+            # an intermediate controller port. Direct seat→weapon links
+            # without an intermediate (Spirit, Reliant_Tana, Corsair tail)
+            # don't get RC in the reference.
+            if tag not in controlled_weapon_tags:
                 continue
             seats = tag_to_seats.get(tag) or indirect_tag_to_seats.get(tag)
             if not seats:
