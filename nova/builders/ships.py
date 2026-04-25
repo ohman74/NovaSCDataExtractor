@@ -1583,6 +1583,10 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
         if thruster_type_attr == "vtol" or "vtol" in pn or "_vtol" in item_cls_lower:
             return "VtolThrusters"
         if has_type("mainthruster") or thruster_type_attr == "main":
+            # Decorative pipe ports (KRIG L21/L22 hardpoint_main_thruster_pipes_*)
+            # are cosmetic subsystems the reference omits.
+            if "thruster_pipes" in pn or "_pipes" in pn:
+                return None
             return "MainThrusters"
         return "ManeuveringThrusters"
 
@@ -1659,8 +1663,15 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
     # storage, and module swaps. Dispatch on port name.
     if has_type("cargo") or has_type("container"):
         # Mining-ship ore pods (MOLE mining_pod_*, Prospector, ROC, Golem,
-        # Hornet F7C cargo pod) → CargoContainers in reference.
-        if "mining_pod" in pn or "ore_pod" in pn or ("pod" in pn and "cargo" in pn):
+        # Hornet F7C cargo pod) → CargoContainers in reference. Detect
+        # by port name OR by installed item className.
+        item_cn_for_pod = (item_record.get("className", "") or "").lower() if item_record else ""
+        if ("mining_pod" in pn or "ore_pod" in pn
+                or ("pod" in pn and "cargo" in pn)
+                or "mining_pod" in item_cn_for_pod
+                or "_ore_pod" in item_cn_for_pod
+                or "groundvehiclemining_pod" in item_cn_for_pod
+                or "shipmining_pod" in item_cn_for_pod):
             return "CargoContainers"
         # "stored_pod" ports on the MOLE are empty spare slots — reference
         # omits them entirely.
@@ -2052,16 +2063,16 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
     # Add computed storage entries
     # Reference rule: never emit both "Access" (SeatAccess GenericExterior)
     # AND "Personal Storage" (Cargo.UNDEFINED inventory) on the same ship.
-    # When the standard hardpoint loop emitted Personal Storage entries
-    # for Cargo.UNDEFINED items, suppress the SeatAccess Access entries
-    # from _compute_storage. (Confirmed by surveying all 47+25 ships.)
+    # Scan both the existing tree storage AND the incoming compute_storage
+    # batch for any Personal Storage entry — when present, suppress all
+    # SeatAccess Access entries (confirmed across all 47+25 ships).
     if storage_entries:
         existing_storage = (tree.get("Components", {})
                                 .get("Storage", {})
                                 .get("InstalledItems", []) or [])
         has_personal_storage = any(
             (s.get("Name") or "") == "Personal Storage"
-            for s in existing_storage
+            for s in existing_storage + list(storage_entries)
         )
         for se in storage_entries:
             if has_personal_storage and se.get("Name") == "Access":
@@ -2092,8 +2103,11 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
         if category and category in ("Paints", "Flairs"):
             # Skip ports with no declared types — reference omits them
             # (Gladius hardpoint_cockpit_flair_hanging has empty types
-            # in ship.components.ports, REF doesn't emit it).
-            if port_def and not port_def.get("types"):
+            # in ship.components.ports, REF doesn't emit it). Also skip
+            # when there's no port_def at all (impl XML doesn't define
+            # the port) — ARGO_CSV_Cargo / Hornet F7CM hardpoint_cockpit_flair_hang
+            # are loadout-only with no types to emit.
+            if not port_def or not port_def.get("types"):
                 continue
             # Count empty paint/flair ports (they represent a customizable slot)
             hp = {"PortName": port_name, "Uneditable": False}
