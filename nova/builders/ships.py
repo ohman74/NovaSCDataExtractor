@@ -2560,6 +2560,16 @@ def _compute_storage(loadout_entries, ctx, impl=None):
                     capacity = ctx.get_inventory_capacity(container_guid)
                     if capacity > 0:
                         ad = item_record.get("attachDef", {})
+                        # CargoGrid / ore-pod / module items are emitted via
+                        # their dedicated builders (CargoGrids/CargoContainers/
+                        # Modules); skip them here so they don't double-up
+                        # in Storage.
+                        ad_type = ad.get("type", "")
+                        if ad_type in ("CargoGrid", "Container", "Module"):
+                            children = entry.get("children", [])
+                            if children:
+                                _walk(children)
+                            continue
                         name = ctx.resolve_name(ad.get("name", "Access"))
                         if "PLACEHOLDER" in name:
                             # Reference falls back to className for the few
