@@ -269,7 +269,7 @@ def _build_ship(class_name, record, ctx):
     impl = get_vehicle_impl_data(ctx.vehicle_impls, veh_def, class_name)
 
     # Compute storage from seat access inventory containers
-    storage_entries = _compute_storage(default_loadout, ctx)
+    storage_entries = _compute_storage(default_loadout, ctx, impl)
     if storage_entries:
         # Will be placed in Hardpoints.Components.Storage
         ship["_storage"] = storage_entries
@@ -2016,6 +2016,12 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
                 rt = port_def.get("requiredPortTags", "")
                 if rt:
                     hp["RequiredTags"] = rt.split()
+            # Ship-internal flair ports (declared in ship.components.ports)
+            # inherit the ship's attachDef.tags as their Tags. Impl-only
+            # ports (not in ship.components.ports) omit Tags.
+            if (category == "Flairs" and ship_tags
+                    and port_name in ship_internal_ports):
+                hp["Tags"] = list(ship_tags)
             _place(tree, category, hp)
 
     # Radar DetectionCapability
@@ -2366,14 +2372,31 @@ def _enrich_shield_info(tree, loadout_entries, ctx, class_name=""):
         shields_node["MaxItem"] = float(max_item)
 
 
-def _compute_storage(loadout_entries, ctx):
+def _compute_storage(loadout_entries, ctx, impl=None):
     """Find storage/inventory entries by checking seat access entities.
 
     Reference omits storage entries whose item name doesn't resolve (the
     @LOC_PLACEHOLDER fallback) — those represent internal inventory blocks
     not surfaced as cargo.
+
+    Uneditable mirrors the impl-XML port flag for the loadout port the
+    inventory hangs off of: SeatAccess ports with `uneditable` flag emit
+    Uneditable:true; ports with empty flags omit the field entirely.
     """
     storage = []
+
+    # Build port_name → uneditable lookup from impl XML so we can mirror
+    # the SeatAccess port's flag. Only the immediate loadout-port name is
+    # used (loadout entries carry portName at the top level).
+    port_uneditable = {}
+    if impl:
+        def _collect(ports):
+            for p in ports or []:
+                pn = p.get("name", "").lower()
+                if pn:
+                    port_uneditable[pn] = bool(p.get("uneditable"))
+                _collect(p.get("subPorts"))
+        _collect(impl.get("ports"))
 
     def _walk(entries):
         for entry in entries:
@@ -2392,14 +2415,20 @@ def _compute_storage(loadout_entries, ctx):
                             if children:
                                 _walk(children)
                             continue
-                        storage.append({
+                        port_name = (entry.get("portName") or "").lower()
+                        st = {
                             "Name": name,
                             "Mass": 0.0,
                             "Size": ad.get("size", 1),
                             "Grade": ad.get("grade", 1),
                             "Capacity": capacity,
-                            "Uneditable": True,
-                        })
+                        }
+                        # Reference only emits Uneditable when the impl-XML
+                        # port carries the `uneditable` flag. Empty-flag
+                        # SeatAccess ports omit the field entirely.
+                        if port_uneditable.get(port_name):
+                            st["Uneditable"] = True
+                        storage.append(st)
             children = entry.get("children", [])
             if children:
                 _walk(children)
@@ -2578,6 +2607,13 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
         }
         if not _omit_baseloadout_class(full_type):
             bl["Class"] = bl_class
+        elif full_type == "FlightController.UNDEFINED":
+            # Custom-named flight blades (item name like
+            # "@item_name_FLBL_<ship>_standard") emit Class:"" instead of
+            # omitting the field entirely. Generic blades (item name
+            # "@item_Name_FLGT_BL_Controller") still omit Class.
+            if ad.get("name", "").startswith("@item_name_FLBL_"):
+                bl["Class"] = ""
         entry["BaseLoadout"] = bl
         # Types: use the port definition's declared types list if present
         # and non-empty. When the port_def exists but has an empty types list
