@@ -2803,8 +2803,13 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
         # Resolve Name with fallback to className when localization is the
         # generic "<= PLACEHOLDER =>" / @LOC_PLACEHOLDER marker (Apollo OC
         # rooms, Retaliator OC rooms — reference uses className in this case).
+        # Also fall back when the resolved name is @LOC_EMPTY or an
+        # unresolved @itemPort_* marker (Reclaimer/MOTH/Vulture/Fortune/
+        # Salvation salvage arms).
         bl_name = ctx.resolve_name(ad.get("name", ""))
         if (bl_name == "<= PLACEHOLDER =>" or bl_name == "@LOC_PLACEHOLDER"
+                or bl_name == "@LOC_EMPTY"
+                or (bl_name and bl_name.startswith("@itemPort_"))
                 or not bl_name):
             bl_name = entity_class
         bl = {
