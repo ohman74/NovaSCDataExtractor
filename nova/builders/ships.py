@@ -1512,10 +1512,14 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
         item_cls_lower = ""
         if item_record:
             item_cls_lower = (item_record.get("className", "") or "").lower()
+        # Retro takes precedence over VTOL when both substrings appear in
+        # the port name (DRAK_Golem hardpoint_vtol_retro_thruster_*).
+        is_retro = (thruster_type_attr == "retro" or "retro" in pn
+                    or "_retro" in item_cls_lower or item_cls_lower.endswith("_retro"))
+        if is_retro:
+            return "RetroThrusters"
         if thruster_type_attr == "vtol" or "vtol" in pn or "_vtol" in item_cls_lower:
             return "VtolThrusters"
-        if thruster_type_attr == "retro" or "retro" in pn or "_retro" in item_cls_lower or item_cls_lower.endswith("_retro"):
-            return "RetroThrusters"
         if has_type("mainthruster") or thruster_type_attr == "main":
             return "MainThrusters"
         return "ManeuveringThrusters"
