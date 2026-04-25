@@ -2313,17 +2313,22 @@ def _enrich_remote_controllers(tree, loadout_entries, ctx, port_defs):
                     missile_controller_tags.add(tag)
 
     # Two-hop chain: weapon-port tag X -> intermediate controller port with
-    # controllableTags Y AND PriorityGroup non-exclusive on tag X -> seat
-    # with exclusive_control on Y. Hornet F7CM gun_center: gun tag=
-    # turret_center → controller port (controllableTags=weapon_controller_
-    # copilot, PG Turret tag=turret_center) → copilot seat exclusive on
-    # weapon_controller_copilot.
+    # controllableTags Y AND PriorityGroup (exclusive OR non-exclusive) on
+    # tag X -> seat with exclusive_control on Y. Hornet F7CM gun_center:
+    # gun tag=turret_center → controller port (controllableTags=weapon_
+    # controller_copilot, PG Turret tag=turret_center) → copilot seat
+    # exclusive on weapon_controller_copilot. Idris bridge RTs follow the
+    # same pattern with exclusive_control PG entries instead of numeric
+    # priorities.
     indirect_tag_to_seats = {}
     for port_name, port_def in port_defs.items():
         if not isinstance(port_def, dict):
             continue
         ctags = port_def.get("controllableTags")
-        controlled = port_def.get("controlledTags") or []
+        # Combine both PG sources — the intermediate controller may use
+        # either exclusive_control (Idris) or numeric priorities (F7CM).
+        controlled = list(port_def.get("controlledTags") or []) + \
+                     list(port_def.get("exclusiveControl") or [])
         if not ctags or not controlled:
             continue
         # The seat that controls this controller port:
