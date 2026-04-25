@@ -1403,6 +1403,17 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
                 or "camera_turret" in item_cn
                 or "bomb_turret" in item_cn):
             return None
+        # Mustang variant cargo "modules" (CNOU_Mustang_Cargo_Rack,
+        # CNOU_Mustang_Beta_Cover_Back, etc.) and similar placeholder cargo
+        # racks at cargo_module ports are decorative covers, not gameplay
+        # cargo bays — reference omits them. Detection: Container.Cargo
+        # item with "@LOC_PLACEHOLDER" name installed at a *_module port.
+        ad = item_record.get("attachDef", {})
+        ad_type = f"{ad.get('type','')}.{ad.get('subType','')}"
+        if (ad_type == "Container.Cargo"
+                and ad.get("name", "") == "@LOC_PLACEHOLDER"
+                and ("_module" in pn or pn.endswith("module"))):
+            return None
 
     # ── Structural skip: port types that never carry a gameplay hardpoint. ──
     # Skip only when *every* declared type on the port is in the skip set;
@@ -1606,8 +1617,16 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
 
     # Salvage family — structural types are several variants.
     # (SalvageController is already in _SKIP_PORT_TYPES.)
-    if (has_type("salvagefieldsupporter") or has_type("salvagefillerstation")
-            or "salvagemount" in port_tags):
+    # Reference excludes SalvageFillerStation / SalvageInternalStorage /
+    # SalvageFieldSupporter items entirely (internal salvage subsystems,
+    # not gameplay hardpoints). Only include the salvage tool/turret types.
+    it_lower = (item_type or "").lower()
+    if it_lower.startswith(("salvagefillerstation.", "salvageinternalstorage.",
+                            "salvagefieldsupporter.")) or it_lower in (
+            "salvagefillerstation", "salvageinternalstorage",
+            "salvagefieldsupporter"):
+        return None
+    if "salvagemount" in port_tags:
         return "SalvageHardpoints"
     if has_type("toolarm") and ("salvage" in pn or "salvagemount" in port_tags):
         return "SalvageHardpoints"
