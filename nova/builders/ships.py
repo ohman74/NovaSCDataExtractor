@@ -1999,6 +1999,11 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
             item_type = port_def["types"][0]
         category = _classify_port(port_name, item_type, port_def)
         if category and category in ("Paints", "Flairs"):
+            # Skip ports with no declared types — reference omits them
+            # (Gladius hardpoint_cockpit_flair_hanging has empty types
+            # in ship.components.ports, REF doesn't emit it).
+            if port_def and not port_def.get("types"):
+                continue
             # Count empty paint/flair ports (they represent a customizable slot)
             hp = {"PortName": port_name, "Uneditable": False}
             if port_def:
