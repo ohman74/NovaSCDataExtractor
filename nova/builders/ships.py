@@ -1395,6 +1395,14 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
         item_cn = (item_record.get("className", "") or "").lower()
         if item_cn.startswith("weapon_rack_") or "_weapon_rack_" in item_cn:
             return "WeaponsRacks"
+        # Door blanking covers (Idris Door_Ship_Exterior_*_Turret_Cover) and
+        # turret cap items skip entirely — reference omits them regardless of
+        # what port type the loadout sees them through.
+        if (item_cn.startswith("door_")
+                or "_turret_cap" in item_cn
+                or "camera_turret" in item_cn
+                or "bomb_turret" in item_cn):
+            return None
 
     # ── Structural skip: port types that never carry a gameplay hardpoint. ──
     # Skip only when *every* declared type on the port is in the skip set;
@@ -1429,6 +1437,16 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
     # Weapons and weapon-like mounts. Missile/bomb racks that also carry a
     # WeaponGun.Rocket type must be matched BEFORE the WeaponGun branch
     # (bomb racks list both).
+    # Item-type override: when the installed item is a MissileRack but the
+    # port is typed Turret.GunTurret/WeaponGun.Gun (Fury_Miru variant
+    # installs MissileRacks at gun-typed ports), route by item type.
+    it_lower_for_override = (item_type or "").lower()
+    if it_lower_for_override == "missilelauncher.missilerack":
+        if "torpedo_storage" in pn or "missile_storage" in pn:
+            return None
+        return "MissileRacks"
+    if it_lower_for_override == "bomblauncher.bombrack":
+        return "BombRacks"
     if has_type("missilelauncher"):
         # Storage racks on capital ships (Perseus torpedo_storage_*) are
         # ammo holding bays — typed MissileLauncher but reference omits
@@ -1468,6 +1486,12 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
                     or "bomb_turret" in item_cn_lower
                     or "_turret_cap" in item_cn_lower):
                 return None
+            # Tractor turret items (MISC_Reliant_Remote_Tractor_Turret,
+            # MISC_Hull_B_SCItem_Remote_Turret_Tractor_*) belong in
+            # UtilityHardpoints regardless of port name.
+            if ("tractor_turret" in item_cn_lower
+                    or ("tractor_" in item_cn_lower and "_turret" in item_cn_lower)):
+                return "UtilityHardpoints"
         # AI-controlled turrets (e.g. Idris AI_Turret_Top/Bottom_*) are
         # remote-controlled. Item className contains "_AI_Turret" and the
         # localized name is "@item_Name_Turret_Remote".
@@ -1475,9 +1499,11 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
             return "RemoteTurrets"
         # Remote-operated turrets (no occupant; pilot or remote crew member
         # fires from a console). Port name or installed item className is
-        # the cleanest discriminator.
+        # the cleanest discriminator. Item className matches when "remote"
+        # and "turret" both appear (e.g. ANVL_Ballista_Remote_Top_Turret,
+        # CRUS_Spirit_SCItem_Remote_Turret).
         if ("remote_turret" in pn or "_remote_" in pn or "remoteturret" in pn
-                or "_remote_turret" in item_cn_lower or "remote_turret" in item_cn_lower):
+                or ("_remote" in item_cn_lower and "_turret" in item_cn_lower)):
             return "RemoteTurrets"
         # Point Defense (PDC) turrets — small autonomous turrets on capitals.
         if "pdc" in pn or "point_defense" in pn:
@@ -1997,8 +2023,22 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
                 )["InstalledItems"].append(ifcs_entry)
 
     # Add computed storage entries
+    # Reference rule: never emit both "Access" (SeatAccess GenericExterior)
+    # AND "Personal Storage" (Cargo.UNDEFINED inventory) on the same ship.
+    # When the standard hardpoint loop emitted Personal Storage entries
+    # for Cargo.UNDEFINED items, suppress the SeatAccess Access entries
+    # from _compute_storage. (Confirmed by surveying all 47+25 ships.)
     if storage_entries:
+        existing_storage = (tree.get("Components", {})
+                                .get("Storage", {})
+                                .get("InstalledItems", []) or [])
+        has_personal_storage = any(
+            (s.get("Name") or "") == "Personal Storage"
+            for s in existing_storage
+        )
         for se in storage_entries:
+            if has_personal_storage and se.get("Name") == "Access":
+                continue
             _place(tree, "Storage", se)
 
     # Add ports from vehicle impl that aren't in the loadout
@@ -2409,16 +2449,23 @@ def _compute_storage(loadout_entries, ctx, impl=None):
     """
     storage = []
 
-    # Build port_name → uneditable lookup from impl XML so we can mirror
-    # the SeatAccess port's flag. Only the immediate loadout-port name is
-    # used (loadout entries carry portName at the top level).
+    # Build port_name → (uneditable, types) lookup from impl XML.
+    # uneditable: mirror the SeatAccess port's flag for output.
+    # types: when the impl-XML port is typed Door.* (mechanism door for the
+    # storage cabinet, e.g. ANVL_Hawk hardpoint_personal_storage), reference
+    # omits the entire storage entry — these are cabinet doors, not user-
+    # facing inventory hardpoints.
     port_uneditable = {}
+    port_types_lower = {}
     if impl:
         def _collect(ports):
             for p in ports or []:
                 pn = p.get("name", "").lower()
                 if pn:
                     port_uneditable[pn] = bool(p.get("uneditable"))
+                    port_types_lower[pn] = [
+                        (t or "").lower() for t in (p.get("types") or [])
+                    ]
                 _collect(p.get("subPorts"))
         _collect(impl.get("ports"))
 
@@ -2440,6 +2487,16 @@ def _compute_storage(loadout_entries, ctx, impl=None):
                                 _walk(children)
                             continue
                         port_name = (entry.get("portName") or "").lower()
+                        # Skip storage entries hung off Door-typed impl ports
+                        # (Hawk/Hurricane/Guardian hardpoint_personal_storage):
+                        # those are cabinet door mechanisms, not gameplay
+                        # inventory hardpoints, and reference omits them.
+                        ptypes = port_types_lower.get(port_name, [])
+                        if any(t.startswith("door") for t in ptypes):
+                            children = entry.get("children", [])
+                            if children:
+                                _walk(children)
+                            continue
                         st = {
                             "Name": name,
                             "Mass": 0.0,
@@ -3238,6 +3295,15 @@ def _collapse_empty_categories(tree):
         if isinstance(block, dict) and not (block.get("InstalledItems") or []):
             if "InstalledItems" in block:
                 del block["InstalledItems"]
+    # Shields: when InstalledItems is empty, drop both InstalledItems and
+    # Hardpoints (ground vehicles like HoverQuad/Dragonfly/ROC keep only
+    # FaceType / MaxItem on the Shields node).
+    shields_block = systems.get("Shields")
+    if isinstance(shields_block, dict) and not (shields_block.get("InstalledItems") or []):
+        if "InstalledItems" in shields_block:
+            del shields_block["InstalledItems"]
+        if "Hardpoints" in shields_block:
+            del shields_block["Hardpoints"]
 
     # Components.Avionics: FlightBlade collapses to {} when empty;
     # Radars/SelfDestruct drop empty InstalledItems.
