@@ -1430,6 +1430,13 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None):
         # item with "@LOC_PLACEHOLDER" name installed at a *_module port.
         ad = item_record.get("attachDef", {})
         ad_type = f"{ad.get('type','')}.{ad.get('subType','')}"
+        # Misc.UNDEFINED placeholder items at weapon mount ports
+        # (ORIG_30i_Weapon_Mount on hardpoint_weapon_mount of 300i/325a/350r)
+        # are decorative anchors, not gameplay weapons — reference omits them.
+        if (ad_type == "Misc.UNDEFINED"
+                and ad.get("name", "") == "@LOC_PLACEHOLDER"
+                and ("weapon_mount" in pn or "weapon_pilot" in pn)):
+            return None
         if (ad_type == "Container.Cargo"
                 and ad.get("name", "") == "@LOC_PLACEHOLDER"
                 and ("_module" in pn or pn.endswith("module"))):
