@@ -466,6 +466,25 @@ _BASELOADOUT_CLASS_OMIT_TYPES = frozenset({
 # racks (AEGS_Eclipse, ORIG_100i/125a/135c, RSI_Constellation_*, RSI_Scorpius,
 # VNCL_Blade/Glaive/Scythe, MISC_Freelancer_MIS, MISC_Starfarer_Gemini) drop
 # the field. No structural discriminator found in stditem data — hardcode.
+_BASELOADOUT_CLASS_OMIT_TURRETS = frozenset({
+    "ANVL_Asgard_Nose_Turret_S4",
+    "ANVL_Terrapin_Nose_Turret_S3",
+    "ANVL_Valkyrie_Nose_Turret_S3",
+    "BEHR_PC2_Dual_S3",
+    "BEHR_PC2_Dual_S4",
+    "CNOU_Mustang_Nose_Turret_S3",
+    "DRAK_Dual_S3",
+    "Grin_MXC_Turret",
+    "MISC_Starlancer_Dual_Gimbal",
+    "MISC_Starlancer_TAC_Missile_Gimbal",
+    "MISC_Starlancer_TAC_Missile_Gimbal_R",
+    "ORIG_85X_Turret",
+    "RSI_Lynx_Ball_Turret",
+    "RSI_Ursa_Rover_SCItem_BallTurret",
+    "TMBL_Storm_AA_Module",
+    "UMNT_ANVL_S5_Rotodome_Mk2",
+})
+
 _BASELOADOUT_CLASS_OMIT_MISSILERACKS = frozenset({
     "MRCK_S02_ORIG_100i_Dual_S02",
     "MRCK_S02_ORIG_125a_Quad_S02",
@@ -3041,7 +3060,8 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
             "Grade": ad.get("grade", 0),
         }
         if (not _omit_baseloadout_class(full_type)
-                and entity_class not in _BASELOADOUT_CLASS_OMIT_MISSILERACKS):
+                and entity_class not in _BASELOADOUT_CLASS_OMIT_MISSILERACKS
+                and entity_class not in _BASELOADOUT_CLASS_OMIT_TURRETS):
             bl["Class"] = bl_class
         elif full_type == "FlightController.UNDEFINED":
             # Custom-named flight blades (item name like
