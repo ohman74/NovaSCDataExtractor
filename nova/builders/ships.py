@@ -3024,11 +3024,14 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
         else:
             entry["Loadout"] = item_guid or entity_class
         # BaseLoadout.Class: look up via manufacturer class map (matches stditem.py)
-        from .stditem import MANUFACTURER_CLASS, _COMPONENT_TYPES_CLASSED
+        from .stditem import (MANUFACTURER_CLASS, _COMPONENT_TYPES_CLASSED,
+                                _CLASS_VALUE_OVERRIDES)
         base_type = full_type.split(".")[0] if full_type else ""
         mfr_code = (mfr or {}).get("Code", "") if mfr else ""
         bl_class = ""
-        if base_type in _COMPONENT_TYPES_CLASSED and mfr_code:
+        if entity_class in _CLASS_VALUE_OVERRIDES:
+            bl_class = _CLASS_VALUE_OVERRIDES[entity_class]
+        elif base_type in _COMPONENT_TYPES_CLASSED and mfr_code:
             if full_type == "LifeSupportGenerator.UNDEFINED":
                 # Capital-class (size 4) is ship-integrated; smaller sizes
                 # are player-purchasable civilian grade.
