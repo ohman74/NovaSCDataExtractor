@@ -305,6 +305,10 @@ def _parse_item_port(part_elem):
         "minSize": safe_int(ip_elem.get("minSize") or ip_elem.get("minsize")),
         "maxSize": safe_int(ip_elem.get("maxSize") or ip_elem.get("maxsize")),
     }
+    # skipPart marks variant-only / disabled ports (Zeus EMP/QED, etc.) —
+    # reference omits these entirely.
+    if part_elem.get("skipPart") == "1":
+        port["skipPart"] = True
 
     # defaultWeaponGroup: presence signals a pilot-controlled mount (reference
     # classifies these as PilotWeapons even when the Type list includes a

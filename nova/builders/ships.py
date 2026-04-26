@@ -2230,6 +2230,12 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
     # impl-XML ControllerDef.controllableTags / PriorityGroups.
     _enrich_remote_controllers(tree, loadout_entries, ctx, port_defs)
 
+    # Empty EMP/QED slots: count impl-XML ports typed EMP or
+    # QuantumInterdictionGenerator that have no loadout entry. Reference
+    # emits them as `InterdictionHardpoints: {EMP/QED: {Hardpoints: N}}`
+    # without InstalledItems (e.g. Vanguard, Avenger Stalker, Scorpius).
+    _enrich_empty_interdiction(tree, loadout_entries, port_defs)
+
     # TotalFuelIntakeRate on FuelIntakes block
     fi_block = tree.get("Components", {}).get("Systems", {}).get("FuelIntakes", {})
     if isinstance(fi_block, dict):
@@ -2463,6 +2469,49 @@ def _enrich_remote_controllers(tree, loadout_entries, ctx, port_defs):
                 "Slaved": tag in slaved_tags,
                 "Seats": unique_seats,
             }
+
+
+def _enrich_empty_interdiction(tree, loadout_entries, port_defs):
+    """Count impl-XML EMP/QED ports without loadout items.
+
+    Reference emits `InterdictionHardpoints.{EMP,QED}.Hardpoints: N` for
+    ships with empty interdiction slots. Filled slots already produce
+    InstalledItems via the main loadout walk.
+    """
+    # Build set of port names that have a loadout entry (filled).
+    filled = set()
+
+    def _walk(entries):
+        for e in entries:
+            pn = e.get("portName", "")
+            if pn and (e.get("entityClassName") or e.get("entityClassReference")):
+                filled.add(pn.lower())
+            for c in e.get("children", []) or []:
+                _walk([c])
+
+    _walk(loadout_entries)
+
+    weapons = tree.setdefault("Weapons", {})
+    interdiction = weapons.setdefault("InterdictionHardpoints", {})
+
+    for port_name, pd in port_defs.items():
+        if not isinstance(pd, dict):
+            continue
+        if pd.get("skipPart"):
+            continue
+        if port_name.lower() in filled:
+            continue
+        types = [t.lower() for t in pd.get("types", []) or []]
+        sub_key = None
+        if any(t == "emp" or t.startswith("emp.") for t in types):
+            sub_key = "EMP"
+        elif any(t == "quantuminterdictiongenerator"
+                  or t.startswith("quantuminterdictiongenerator.") for t in types):
+            sub_key = "QED"
+        if not sub_key:
+            continue
+        sub = interdiction.setdefault(sub_key, {})
+        sub["Hardpoints"] = sub.get("Hardpoints", 0) + 1
 
 
 def _enrich_controllers(tree, loadout_entries, ctx, class_name):
