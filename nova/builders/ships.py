@@ -2257,8 +2257,11 @@ def _enrich_remote_controllers(tree, loadout_entries, ctx, port_defs):
        If a seat exclusively controls that tag, set RemoteController.Seats
        to that seat's installed-item className.
 
-    Slaved is left as False (default) — REF distribution is mixed and the
-    discriminator isn't fully understood.
+    Slaved=True when the weapon's tag has a numeric (non-exclusive) Turret/
+    WeaponGun/MissileLauncher/BombLauncher priority on it from any port.
+    Multi-controller weapons (one seat exclusive + another seat numeric on
+    same tag) get Slaved=True. Reclaimer-style numeric WeaponController-only
+    chains stay Slaved=False because the Turret/WeaponGun PG isn't numeric.
     """
     # Build a port_name → installed-item-className map from the loadout.
     port_to_item = {}
@@ -2311,6 +2314,10 @@ def _enrich_remote_controllers(tree, loadout_entries, ctx, port_defs):
     # Spirit/Constellation only have missile controller and don't get RC).
     weapon_controller_tags = set()
     missile_controller_tags = set()
+    # Tags whose weapon-control PG entry is numeric (non-exclusive). When a
+    # weapon's tag has any numeric Turret/WeaponGun/MissileLauncher PG entry,
+    # multiple seats can claim it → Slaved=True.
+    slaved_tags = set()
     for port_name, port_def in port_defs.items():
         if not isinstance(port_def, dict):
             continue
@@ -2320,6 +2327,10 @@ def _enrich_remote_controllers(tree, loadout_entries, ctx, port_defs):
                     weapon_controller_tags.add(tag)
                 elif it_type in ("MissileLauncher", "BombLauncher"):
                     missile_controller_tags.add(tag)
+        for it_type, tag in port_def.get("controlledTags") or []:
+            if it_type in ("Turret", "WeaponGun", "TurretBase",
+                            "MissileLauncher", "BombLauncher"):
+                slaved_tags.add(tag)
 
     # Two-hop chain: weapon-port tag X -> intermediate controller port with
     # controllableTags Y AND PriorityGroup (exclusive OR non-exclusive) on
@@ -2407,7 +2418,7 @@ def _enrich_remote_controllers(tree, loadout_entries, ctx, port_defs):
                     seen.add(s)
                     unique_seats.append(s)
             item["RemoteController"] = {
-                "Slaved": False,
+                "Slaved": tag in slaved_tags,
                 "Seats": unique_seats,
             }
 
