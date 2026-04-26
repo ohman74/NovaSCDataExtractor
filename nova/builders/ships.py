@@ -461,6 +461,29 @@ _BASELOADOUT_CLASS_OMIT_TYPES = frozenset({
     "TurretBase.MannedTurret",
 })
 
+# MissileLauncher.MissileRack classNames whose BaseLoadout reference omits
+# Class entirely. Most MRCK items get Class:"" but these 15 ship-specific
+# racks (AEGS_Eclipse, ORIG_100i/125a/135c, RSI_Constellation_*, RSI_Scorpius,
+# VNCL_Blade/Glaive/Scythe, MISC_Freelancer_MIS, MISC_Starfarer_Gemini) drop
+# the field. No structural discriminator found in stditem data — hardcode.
+_BASELOADOUT_CLASS_OMIT_MISSILERACKS = frozenset({
+    "MRCK_S02_ORIG_100i_Dual_S02",
+    "MRCK_S02_ORIG_125a_Quad_S02",
+    "MRCK_S03_VNCL_Quad_S01",
+    "MRCK_S03_VNCL_Quad_S01_Blade",
+    "MRCK_S04_RSI_Constellation",
+    "MRCK_S04_RSI_Scorpius",
+    "MRCK_S04_RSI_Scorpius_bottom_right",
+    "MRCK_S04_RSI_Scorpius_top_left",
+    "MRCK_S04_RSI_Scorpius_top_right",
+    "MRCK_S04_VNCL_Quad_S02",
+    "MRCK_S05_MISC_Freelancer_MIS_Left",
+    "MRCK_S05_MISC_Freelancer_MIS_Right",
+    "MRCK_S05_RSI_Constellation",
+    "MRCK_S06_MISC_Gemini",
+    "MRCK_S09_AEGS_Eclipse",
+})
+
 
 def _omit_baseloadout_class(full_type):
     return full_type in _BASELOADOUT_CLASS_OMIT_TYPES
@@ -3017,7 +3040,8 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
             "Size": size,
             "Grade": ad.get("grade", 0),
         }
-        if not _omit_baseloadout_class(full_type):
+        if (not _omit_baseloadout_class(full_type)
+                and entity_class not in _BASELOADOUT_CLASS_OMIT_MISSILERACKS):
             bl["Class"] = bl_class
         elif full_type == "FlightController.UNDEFINED":
             # Custom-named flight blades (item name like
