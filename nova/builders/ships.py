@@ -3543,13 +3543,13 @@ def _count_hardpoints(items):
     return total
 
 
-# Categories whose Hardpoints/ItemsQuantity count includes nested Ports
-# (e.g. PilotWeapons Hardpoints = mount count + weapon-slot count).
-# MissileRacks/BombRacks intentionally excluded — reference counts only
-# the racks themselves, not the missile/bomb slots inside them.
+# Categories whose Hardpoints count includes nested Ports recursively.
+# RemoteTurrets and UtilityHardpoints use len(InstalledItems) to match ref.
+# MannedTurrets/PilotWeapons need a deeper formula that walks each installed
+# item's own port definitions (not just the loadout tree) — current recursive
+# count over loadout `Ports` undercounts but is closer than len.
 _WEAPON_CATEGORIES_RECURSIVE_COUNT = {
-    "PilotWeapons", "MannedTurrets", "RemoteTurrets", "PDCTurrets",
-    "UtilityHardpoints", "UtilityTurrets",
+    "PilotWeapons", "MannedTurrets", "PDCTurrets", "UtilityTurrets",
 }
 
 
