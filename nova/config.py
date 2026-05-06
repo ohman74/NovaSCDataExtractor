@@ -6,19 +6,36 @@ import sys
 
 
 class Config:
-    def __init__(self, config_path=None):
+    def __init__(self, config_path=None, channel_override=None):
         if config_path is None:
             config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "nova_config.json")
 
         with open(config_path, "r") as f:
             data = json.load(f)
 
-        self.sc_live_path = os.path.normpath(data["sc_live_path"])
+        configured_path = os.path.normpath(data["sc_live_path"])
+        if channel_override:
+            self.sc_live_path = os.path.join(
+                os.path.dirname(configured_path), channel_override
+            )
+        else:
+            self.sc_live_path = configured_path
+
+        # Channel name = SC install dir basename (e.g. "Live", "PTU", "EPTU").
+        # Used to scope cache + output to per-channel subdirectories so a
+        # Live run and a PTU run don't trample each other.
+        self.channel = os.path.basename(self.sc_live_path)
 
         base_dir = os.path.dirname(config_path)
         self.tools_dir = os.path.normpath(os.path.join(base_dir, data.get("tools_dir", "./tools")))
-        self.cache_dir = os.path.normpath(os.path.join(base_dir, data.get("cache_dir", "./cache")))
-        self.output_dir = os.path.normpath(os.path.join(base_dir, data.get("output_dir", "./output")))
+
+        # Roots are the un-channelled locations. Per-channel subdirs hang
+        # off these. cache_dir / output_dir always point at the active
+        # channel's subdir so existing builders Just Work.
+        self.cache_root = os.path.normpath(os.path.join(base_dir, data.get("cache_dir", "./cache")))
+        self.output_root = os.path.normpath(os.path.join(base_dir, data.get("output_dir", "./output")))
+        self.cache_dir = os.path.join(self.cache_root, self.channel)
+        self.output_dir = os.path.join(self.output_root, self.channel)
 
         self.p4k_path = os.path.join(self.sc_live_path, "Data.p4k")
         self.unp4k_path = os.path.join(self.tools_dir, "unp4k.exe")
@@ -77,5 +94,7 @@ class Config:
 
     def ensure_dirs(self):
         os.makedirs(self.tools_dir, exist_ok=True)
+        os.makedirs(self.cache_root, exist_ok=True)
+        os.makedirs(self.output_root, exist_ok=True)
         os.makedirs(self.cache_dir, exist_ok=True)
         os.makedirs(self.output_dir, exist_ok=True)

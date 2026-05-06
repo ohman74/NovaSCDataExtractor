@@ -1,9 +1,10 @@
 """Nova Star Citizen Data Extractor - CLI entry point.
 
 Usage:
-    python -m nova
+    python -m nova                    # Run Live, then PTU if newer; zip both
     python -m nova --config path/to/config.json
-    python -m nova --channel PTU
+    python -m nova --channel PTU      # Run only the named channel
+    python -m nova --no-package       # Skip the Live.zip / PTU.zip step
     python -m nova --force
     python -m nova --only ships
 """
@@ -13,6 +14,7 @@ import json
 import os
 import sys
 import time
+import zipfile
 
 from . import __version__
 from .config import Config
@@ -173,12 +175,100 @@ BUILDERS = {
 }
 
 
+def _parse_version_tuple(s):
+    """Parse a build-manifest Version string ("4.7.178.8917") into a tuple."""
+    if not s:
+        return ()
+    out = []
+    for part in s.split("."):
+        try:
+            out.append(int(part))
+        except ValueError:
+            return tuple(out)  # fall back to whatever parsed cleanly
+    return tuple(out)
+
+
+def _read_manifest_version(channel_path):
+    """Read build_manifest.id from an SC install dir, return Version string."""
+    manifest_path = os.path.join(channel_path, "build_manifest.id")
+    if not os.path.isfile(manifest_path):
+        return None
+    try:
+        with open(manifest_path, "r") as f:
+            return json.load(f).get("Data", {}).get("Version")
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def find_newer_ptu(live_config):
+    """Return a PTU Config if a sibling PTU install exists with a newer Version.
+
+    Compared on the build_manifest.id `Version` field (e.g. "4.7.178.8917"),
+    parsed as a tuple of ints. Returns None when:
+    - No PTU folder exists alongside the configured Live path
+    - PTU has no Data.p4k or no build_manifest.id
+    - PTU version is <= Live version
+    """
+    sc_root = os.path.dirname(live_config.sc_live_path)
+    ptu_path = os.path.join(sc_root, "PTU")
+    if not os.path.isdir(ptu_path):
+        return None
+    if not os.path.isfile(os.path.join(ptu_path, "Data.p4k")):
+        return None
+
+    live_ver = _parse_version_tuple(_read_manifest_version(live_config.sc_live_path))
+    ptu_ver = _parse_version_tuple(_read_manifest_version(ptu_path))
+
+    if not ptu_ver:
+        return None
+    if live_ver and ptu_ver <= live_ver:
+        return None
+
+    return Config(live_config_path_for(live_config), channel_override="PTU")
+
+
+def live_config_path_for(config):
+    """Helper: return the config-file path that produced `config`.
+
+    Stashed on the Config at load time so PTU re-runs can use the same JSON.
+    """
+    return getattr(config, "_config_path", None) or os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "nova_config.json"
+    )
+
+
+def package_output(config):
+    """Zip every file under `config.output_dir` into `<channel>.zip`.
+
+    Lands in the un-channelled output root (e.g. output/Live.zip,
+    output/PTU.zip) so consumers can pick up either build by name.
+    """
+    if not os.path.isdir(config.output_dir):
+        print(f"  [WARN] No output directory to package: {config.output_dir}")
+        return None
+    zip_path = os.path.join(config.output_root, f"{config.channel}.zip")
+    file_count = 0
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, _, files in os.walk(config.output_dir):
+            for fname in sorted(files):
+                fpath = os.path.join(root, fname)
+                arcname = os.path.relpath(fpath, config.output_dir)
+                zf.write(fpath, arcname)
+                file_count += 1
+    size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+    print(f"  Packaged {file_count} files -> {zip_path} ({size_mb:.1f} MB)")
+    return zip_path
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=f"Nova Star Citizen Data Extractor v{__version__}"
     )
     parser.add_argument("--config", default=None, help="Path to nova_config.json")
-    parser.add_argument("--channel", default=None, help="Override channel (LIVE, PTU)")
+    parser.add_argument("--channel", default=None, help="Override channel (LIVE, PTU). "
+                        "When set, only that channel runs and PTU auto-detection is skipped.")
+    parser.add_argument("--no-package", action="store_true",
+                        help="Skip the per-channel .zip step.")
     parser.add_argument("--force", action="store_true", help="Force re-extraction (bypass cache)")
     parser.add_argument("--only", nargs="+", choices=list(BUILDERS.keys()),
                         help="Extract only specific categories")
@@ -196,15 +286,33 @@ def main():
         print("Please create nova_config.json with your SC install path.")
         sys.exit(1)
 
-    config = Config(config_path)
+    # Run primary channel (Live by default, or whatever --channel says).
+    primary_config = Config(config_path, channel_override=args.channel)
+    primary_config._config_path = config_path
+    run_extraction(primary_config, args)
+    if not args.no_package:
+        print(f"\n[PACKAGE] Zipping {primary_config.channel} output...")
+        package_output(primary_config)
 
-    if args.channel:
-        config.sc_live_path = os.path.join(
-            os.path.dirname(config.sc_live_path), args.channel
-        )
-        config.p4k_path = os.path.join(config.sc_live_path, "Data.p4k")
+    # Auto-run PTU when the user didn't pin a specific channel.
+    if not args.channel:
+        ptu_config = find_newer_ptu(primary_config)
+        if ptu_config is not None:
+            ptu_config._config_path = config_path
+            print(f"\n[PTU] PTU build is newer than Live — running PTU extraction...")
+            run_extraction(ptu_config, args)
+            if not args.no_package:
+                print(f"\n[PACKAGE] Zipping {ptu_config.channel} output...")
+                package_output(ptu_config)
+        else:
+            print(f"\n[PTU] No newer PTU build detected — skipping.")
 
+
+def run_extraction(config, args):
+    """Run the full extract -> parse -> build pipeline for one channel."""
     config.ensure_dirs()
+
+    print(f"\n=== Channel: {config.channel} ===")
 
     # Clear cache if forced
     if args.force:
