@@ -295,15 +295,24 @@ def main():
         package_output(primary_config)
 
     # Auto-run PTU when the user didn't pin a specific channel.
+    # PTU failures (e.g. unforge can't decode a newer DCB format) must
+    # NOT abort the script — the primary Live build is already complete
+    # and packaged. Log a clear warning and exit success.
     if not args.channel:
         ptu_config = find_newer_ptu(primary_config)
         if ptu_config is not None:
             ptu_config._config_path = config_path
             print(f"\n[PTU] PTU build is newer than Live — running PTU extraction...")
-            run_extraction(ptu_config, args)
-            if not args.no_package:
-                print(f"\n[PACKAGE] Zipping {ptu_config.channel} output...")
-                package_output(ptu_config)
+            try:
+                run_extraction(ptu_config, args)
+                if not args.no_package:
+                    print(f"\n[PACKAGE] Zipping {ptu_config.channel} output...")
+                    package_output(ptu_config)
+            except Exception as exc:
+                print(f"\n[PTU] [WARN] PTU extraction failed: {exc}")
+                print(f"       This often happens when unforge.exe can't decode")
+                print(f"       a DCB-format change in the PTU build. Live output")
+                print(f"       is unaffected — Live.zip is already packaged.")
         else:
             print(f"\n[PTU] No newer PTU build detected — skipping.")
 
