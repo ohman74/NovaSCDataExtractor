@@ -137,7 +137,17 @@ The following hits look name-based but are **not**; leave them alone:
 
 ## Audit harness
 
-`temp/compare_matrix.py` (gitignored, invoked from repo root) diffs
-`output/vehicle_metadata.json` against the RSI pledge-store's flight-ready
-set (cached in `cache/rsi_flight_ready.json`). Used to verify that filter
-changes don't introduce gaps or anomalies vs. the matrix.
+The ship-matrix snapshot is fetched at the start of every run by
+`nova/matrix.py` and cached at `cache/rsi_flight_ready.json`. The slice
+builder tags each emitted ship with `FlightReady: true/false` based on
+`match_ships(...)`, so a quick filter-regression check is just:
+
+```python
+import json
+matrix = {e["name"]: e for e in json.load(open("cache/rsi_flight_ready.json"))}
+meta   = json.load(open("output/Live/vehicle_metadata.json"))
+flight_ready_in_meta  = {s["ClassName"] for s in meta if s.get("FlightReady")}
+flight_ready_in_matrix = {e for e in matrix if matrix[e].get("production_status") == "flight-ready"}
+```
+
+Compare the two sets to surface missing tags or unexpected emissions.

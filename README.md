@@ -106,31 +106,24 @@ Five JSON files in `output/<channel>/`, matching the documented reference shapes
 | `vehicle_metadata.json` | entry_0 | Catalog metadata (scalar Cargo, Type, store/PU placeholders, FlightReady, Thumbnail) |
 | `vehicle_stats.json` | entry_1 | Detailed spec (object Cargo, FlightCharacteristics, FuelManagement, FlightReady, …) |
 | `vehicle_hardpoints.json` | entry_2 | PortTags (from `SItemPortContainerComponentParams.PortTags`), Hull.Structure, Hardpoints with per-port `RequiredTags`, FlightReady |
-| `vehicle_equipment.json` | entry_3 | Ship/vehicle equipment stdItem records (~2888 items) |
-| `fps_equipment.json` | entry_4 | FPS weapons + attachments stdItem records (~174 items) |
+| `vehicle_equipment.json` | entry_3 | Ship/vehicle equipment stdItem records (~2868 items on current Live) |
+| `fps_equipment.json` | entry_4 | FPS weapons + attachments stdItem records (~496 items on current Live, includes cosmetic skin variants tagged inline) |
 
 Plus `metadata.json` with `gameVersion` (public patch format `<patch>.<p4_changelist>` like `4.7.2.11715810` derived from the RSI launcher log; falls back to the build-manifest `Branch` when the log isn't available), `buildBranch`, `buildVersion`, `p4Change`, `buildDate`, `channel`, and per-dataset counts.
 
-## Output-format compatibility (`vehicle_equipment.json`)
+## Output-format compatibility
 
 The output format is stable across runs and documented field-by-field in
-`DATA_SOURCES.md`. Local baseline-comparison files (kept in `temp/` and
-gitignored) are used during development to catch regressions.
+`DATA_SOURCES.md`. Local baseline files (`temp/reference/entry_*.json`,
+gitignored) are used during development to catch regressions; see
+"Reference files" below.
 
-Per-field stability (100% except where noted):
+### Known edge cases that intentionally differ from the baseline
 
-| Field | Match | Notes |
-|-------|-------|-------|
-| ClassName, Size, Grade, Type, Classification, Name, Volume, Manufacturer, Tags, RequiredTags, Class, Description | 100% | — |
-| Durability, HeatController, ResourceNetwork, Mass, Armour, CounterMeasure, MissileRack, ShieldEmitter, Shield, Missile, Radar, QuantumDrive, Module, MiningLaser, TractorBeam, JumpDrive, Emp, SelfDestruct, SalvageModifier, QuantumInterdiction, Bomb, MissilesController, Ifcs, Turret | 100% | — |
-| CargoContainers, CargoGrid | 100% | — |
-| **Ports** | **831/832** (99.9%) | 1 nested `ControlPanel` loadout resolves to a different class than ref. |
-| **Weapon** | **373/376** (99.2%) | 3 items differ by 0.01 DPS due to Python's round-half-to-even on boundary values (819.725, 149.625). |
-
-### Remaining gaps (known edge cases)
-
-1. **DPS rounding** — `AMRS_LaserCannon_S4`, `APAR_MassDriver_S2`, `KLWE_MassDriver_S2` each differ by ±0.01 on one DPS value. Python's `round()` uses banker's rounding; matching the reference would require IEEE 754 float-aware rounding that breaks other weapons.
-2. **Nested Loadout GUID** — `AEGS_Retaliator_Module_Rear_Cargo` has one deeply nested `ControlPanel` port whose `Loadout` GUID resolves to `RearCargo_Lift_exterior` for us vs `FrontCargo_Lift_Exterior` in ref (likely a data-version difference).
+1. **DPS rounding** — `AMRS_LaserCannon_S4`, `APAR_MassDriver_S2`, `KLWE_MassDriver_S2` each differ by ±0.01 on one DPS value. Python's `round()` uses banker's rounding; matching the baseline would require IEEE 754 float-aware rounding that breaks other weapons.
+2. **Nested Loadout GUID** — `AEGS_Retaliator_Module_Rear_Cargo` has one deeply nested `ControlPanel` port whose `Loadout` GUID resolves to `RearCargo_Lift_exterior` for us vs `FrontCargo_Lift_Exterior` in the baseline (likely a data-version difference).
+3. **FPS catalogue size** — our `fps_equipment.json` emits **all** player-equippable FPS items including cosmetic skin variants (~496 records vs the baseline's ~174). Cosmetic variants are tagged inline with `CosmeticVariant: true` + `CosmeticVariantOf: <base_classname>` so consumers can hide or aggregate them. See `nova/builders/cosmetic.py`.
+4. **Ship/vehicle equipment surface area** — additional fields surfaced beyond the baseline (per-firing-mode `Recoil`, `Crafting`, magazine `Capacity`, `Aim` block, `PowerModes`, `Durability.Wear`, ammunition `Projectile`/`Impulse`/`ArmorPenetration`). All additive — existing fields preserved.
 
 ## How the `stdItem` format is built
 
@@ -186,17 +179,20 @@ Two distinct cosmetic systems run during build:
 
 ## Reference files
 
-Reference files live in `temp/reference_data_new/` (gitignored):
+Baseline comparison files live in `temp/reference/` (gitignored). They are
+optional — the build doesn't read them, only ad-hoc development scripts
+do. The five entries mirror the slice layout:
 
-| File | Content |
+| File | Maps to |
 |------|---------|
-| `entry_0.json` | Vehicle metadata (catalog) |
-| `entry_1.json` | Vehicle stats |
-| `entry_2.json` | Vehicle hardpoints |
-| `entry_3.json` | **Ship/vehicle equipment stdItem (2888 items)** — primary match target |
-| `entry_4.json` | FPS equipment stdItem (174 items) |
+| `entry_0.json` | `vehicle_metadata.json` |
+| `entry_1.json` | `vehicle_stats.json` |
+| `entry_2.json` | `vehicle_hardpoints.json` |
+| `entry_3.json` | `vehicle_equipment.json` |
+| `entry_4.json` | `fps_equipment.json` |
 
-Development-time comparison harnesses live in `temp/` (gitignored): `compare_matrix.py` (vs RSI ship matrix), `compare_equipment.py`, `compare_vehicles.py`, plus per-field `*_diffs.py` tools and `find_cosmetic_dupes.py`.
+The RSI ship-matrix is fetched live by `nova/matrix.py` and cached at
+`cache/rsi_flight_ready.json` (top-level, shared by Live + PTU).
 
 ## Caching
 

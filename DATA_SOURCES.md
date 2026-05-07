@@ -36,7 +36,7 @@ If a new source dir of CryXML-binary files is added later, append it to `CRYXML_
 The flow is:
 
 1. **Stage 1 — Extract**: `unp4k.exe` unpacks `Data.p4k` into `cache/`. Files land as-is (some text, some CryXML-binary).
-2. **Stage 2 — DCB convert**: `Game2.dcb` → `Game2.xml` (via `unforge`).
+2. **Stage 2 — DCB convert**: `Game2.dcb` → `Game2.xml` (via `unforge`). Two output formats are handled transparently by `nova/converter.convert_game_dcb`: legacy single-XML emit (unforge ≤ v4.0.82), and v4.0.83+'s per-record-file emit under `Libs/Foundry/Records/<category>/<name>.xml` — the latter is assembled into a single `<DataForge>...</DataForge>` envelope with malformed records skipped (CIG ships at least one — `TagDatabase.TagDatabase.xml` — with unbalanced tags).
 3. **Stage 3 — Entity collection + CryXML scan**: `get_entity_files` collects the curated ship/ground entity lists, then `scan_cryxml_binaries` walks `CRYXML_BINARY_DIRS` and adds anything else whose header shows it's still binary.
 4. **Stage 4 — Convert CryXML to text**: all collected paths go through `convert_entities`, which `unforge`s each binary file in place.
 5. **Stage 5+**: parsers/builders consume now-readable text XML.
