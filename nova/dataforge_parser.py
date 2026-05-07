@@ -965,6 +965,15 @@ def _parse_entity_record(elem, class_name, guid, path):
 
         elif poly_type == "SItemPortContainerComponentParams":
             components["ports"] = _parse_port_container(comp)
+            # Ship-level PortTags (the tags this ship offers to its ports —
+            # ports' `requiredTags="$X"` matches against these). The base
+            # impl XML's `itemPortTags` is sometimes stale for variants
+            # (F7C Mk2 uses ANVL_Hornet_F7A.xml impl whose itemPortTags
+            # says "Anvil Hornet F7A", but the entity XML correctly
+            # declares "ANVL_Hornet_Base ANVL_Hornet_Mk2 ANVL_Hornet_F7C_Mk2").
+            ship_port_tags = comp.get("PortTags", "")
+            if ship_port_tags:
+                components["shipPortTags"] = ship_port_tags
 
         elif poly_type == "SEntityComponentDefaultLoadoutParams":
             loadout_entries = _parse_default_loadout(comp)

@@ -318,9 +318,17 @@ def _build_ship(class_name, record, ctx):
     if impl and impl.get("mass"):
         ship["Mass"] = impl["mass"]
 
-    # PortTags from vehicle impl's itemPortTags attribute (ref convention for entry_2)
-    if impl and impl.get("itemPortTags"):
-        ship["PortTags"] = impl["itemPortTags"].split()
+    # Ship-level PortTags. Prefer the entity XML's
+    # SItemPortContainerComponentParams.PortTags — it correctly reflects
+    # variant-specific tags (e.g. F7C_Mk2 declares ANVL_Hornet_Mk2 there
+    # while the base impl XML's itemPortTags is the stale F7A value).
+    # Fall back to the impl XML attribute when the entity doesn't carry
+    # its own list.
+    ship_port_tags = components.get("shipPortTags") or ""
+    if not ship_port_tags and impl:
+        ship_port_tags = impl.get("itemPortTags", "")
+    if ship_port_tags:
+        ship["PortTags"] = ship_port_tags.split()
 
     # Compute component mass from loadout
     if default_loadout:
@@ -1658,6 +1666,8 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None,
     PILOT_CTRL_TAGS = {
         "pilotseat", "pilot_seat", "weaponpilot", "pilotseat_weapons",
         "gunnose",  # ORIG ships' nose mount controlled by pilot
+        # Idris main railgun fired from a dedicated pilot-side console.
+        "mainweaponscontrol",
     }
     is_pilot_ctrl = ctrl_lower in PILOT_CTRL_TAGS
 
@@ -1710,7 +1720,10 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None,
             )
             for p in item_inner_ports
         )
-        if has_doorpart:
+        # Bypass for configurable pilot-fire slots (port carries
+        # `defaultWeaponGroup`). The F7C Mk2's cargo door has DoorPart
+        # inner ports but is a real configurable ball-turret slot.
+        if has_doorpart and port_def.get("defaultWeaponGroup") is None:
             return None
         # Structural cap / cover detection: non-Turret type at Turret port
         # with no weapon-bearing inner ports.
@@ -1736,7 +1749,14 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None,
             )
             for p in item_inner_ports
         )
-        if is_turret_port and is_non_turret_item and not has_weapon_inner:
+        # Configurable pilot-fire slots (port carries `defaultWeaponGroup`)
+        # are real hardpoints even when populated with a non-weapon Module
+        # (cargo cap, rotodome, etc.) — F7C Mk1 hardpoint_class_4_center
+        # ships with a Cargo_Mod by default but is structurally a ball-turret
+        # slot. Skip the decorative-cap filter for those.
+        port_has_dwg = port_def.get("defaultWeaponGroup") is not None
+        if (is_turret_port and is_non_turret_item and not has_weapon_inner
+                and not port_has_dwg):
             return None
         # Editorial fallback: REF excludes camera_turret / bomb_turret items
         # even though they pass all structural turret checks. CIG provides
@@ -3925,15 +3945,27 @@ def _compute_interior_storage(class_name, ctx):
 def _add_impl_only_ports(tree, impl_ports, loadout_port_names):
     """Add ports from vehicle impl that aren't in the loadout.
 
-    Only Paints emit unconditionally. Bare WeaponsRacks (impl-defined
-    weapon_rack ports without loadout items, single port per ship) emit
-    a minimal entry — Ballista, Cutlass Black/Blue, ORIG_350r have a
-    single hardpoint_weapon_rack visible in reference. Multi-port
-    weapon_locker patterns (Idris) are omitted from reference.
+    - Paints emit unconditionally.
+    - Flairs emit when the port carries types.
+    - WeaponsRacks: only the bare singular `hardpoint_weapon_rack` pattern
+      (Ballista / Cutlass Black/Blue / ORIG_350r). Multi-port weapon_locker
+      patterns (Idris) are omitted from reference.
+    - Pilot-weapon and turret slots (PilotWeapons / MannedTurrets /
+      RemoteTurrets / PDCTurrets / Mining/Salvage/Utility/Interdiction)
+      emit as empty mount slots. Reference omits empty MissileRack /
+      BombRack slots, so those are deliberately excluded. Limited to
+      top-level impl ports — sub-ports of turret items are walked
+      through the loadout chain instead.
     """
     emitted_names = set()
 
-    def _emit(port):
+    _EMPTY_WEAPON_SLOT_CATEGORIES = {
+        "PilotWeapons", "MannedTurrets", "RemoteTurrets", "PDCTurrets",
+        "InterdictionHardpoints", "MiningHardpoints", "SalvageHardpoints",
+        "UtilityHardpoints", "UtilityTurrets",
+    }
+
+    def _emit(port, is_top_level=False):
         pname = port.get("name", "")
         if not pname or pname in loadout_port_names:
             return
@@ -3942,15 +3974,16 @@ def _add_impl_only_ports(tree, impl_ports, loadout_port_names):
         # twice). REF emits only one entry per unique port name.
         if pname in emitted_names:
             return
-        emitted_names.add(pname)
         item_type = port["types"][0] if port.get("types") else ""
         category = _classify_port(pname, item_type, port)
         if category == "Paints":
+            emitted_names.add(pname)
             hp = {"PortName": pname, "Uneditable": port.get("uneditable", False),
                   "MinSize": port.get("minSize", 0), "MaxSize": port.get("maxSize", 0),
                   "Types": port.get("types", [])}
             _place(tree, category, hp)
         elif category == "Flairs" and port.get("types"):
+            emitted_names.add(pname)
             # Impl-only flair ports (300i hardpoint_custom_*, MOTH hanging,
             # Perseus captains_flair). Skip ports with no types — those are
             # decorative anchors, not customizable flair slots.
@@ -3971,6 +4004,7 @@ def _add_impl_only_ports(tree, impl_ports, loadout_port_names):
             hp["Uneditable"] = port.get("uneditable", False)
             _place(tree, category, hp)
         elif category == "WeaponsRacks" and pname.lower() == "hardpoint_weapon_rack":
+            emitted_names.add(pname)
             # Only the bare singular hardpoint_weapon_rack port pattern.
             hp = {
                 "Name": pname,
@@ -3978,11 +4012,34 @@ def _add_impl_only_ports(tree, impl_ports, loadout_port_names):
                 "Uneditable": port.get("uneditable", False),
             }
             _place(tree, category, hp)
+        elif (is_top_level and category in _EMPTY_WEAPON_SLOT_CATEGORIES
+              and port.get("types")):
+            # Configurable pilot-weapon / turret slot defined by the impl
+            # XML but not filled by the entity's defaultLoadout — e.g. the
+            # Idris `hardpoint_nose_railgun` and any other tag-required
+            # weapon mount with no default install. Restricted to
+            # top-level ports to avoid double-emitting sub-ports of
+            # turret items (those are walked via loadout-entry children).
+            emitted_names.add(pname)
+            hp = {"PortName": pname,
+                  "MinSize": port.get("minSize", 0),
+                  "MaxSize": port.get("maxSize", 0),
+                  "Types": port.get("types", [])}
+            flags_raw = port.get("flags")
+            if isinstance(flags_raw, list) and flags_raw:
+                hp["Flags"] = list(flags_raw)
+            elif isinstance(flags_raw, str) and flags_raw:
+                hp["Flags"] = [f for f in flags_raw.split() if f]
+            rt = port.get("requiredPortTags", "")
+            if rt:
+                hp["RequiredTags"] = rt.split()
+            hp["Uneditable"] = port.get("uneditable", False)
+            _place(tree, category, hp)
 
     for port in impl_ports:
-        _emit(port)
+        _emit(port, is_top_level=True)
         for sub in port.get("subPorts", []):
-            _emit(sub)
+            _emit(sub, is_top_level=False)
 
 
 def _index_ports(impl_ports, port_defs, order_index=None, _depth=0):
@@ -4177,6 +4234,13 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
             else:
                 entry["Flags"] = list(raw)
 
+        # RequiredTags from impl XML (`requiredTags` attribute on ItemPort).
+        # Used by configurable slots to constrain which items can install
+        # (e.g. F7C ball-turret slot requires `$ANVL_Hornet_Base`).
+        rt = port_def.get("requiredPortTags", "") if port_def else ""
+        if rt:
+            entry["RequiredTags"] = rt.split()
+
         # Gimballed / Turret / Fixed flags: Turret.GunTurret mounts are gimbals
         # (pilot aims, mount tracks) -> Gimballed:true. Other Turret.* /
         # TurretBase.* types (BallTurret/NoseMounted/Canard/Top/Bottom/PDC/
@@ -4351,6 +4415,9 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
                 entry["Flags"] = list(flags_raw)
             elif isinstance(flags_raw, str) and flags_raw:
                 entry["Flags"] = [f for f in flags_raw.split() if f]
+            rt = port_def.get("requiredPortTags", "")
+            if rt:
+                entry["RequiredTags"] = rt.split()
 
     # Uneditable mirrors the impl-XML port "uneditable" flag.
     entry["Uneditable"] = bool(port_def and port_def.get("uneditable"))
