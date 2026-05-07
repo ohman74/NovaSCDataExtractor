@@ -2804,6 +2804,63 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
         loadout_port_names = {e.get("portName", "") for e in loadout_entries}
         _add_impl_only_ports(tree, impl_ports, loadout_port_names)
 
+    # Add ports declared only in the ship's entity-XML (components.ports /
+    # SItemPortDef) that are missing from BOTH the impl XML and the
+    # defaultLoadout. Aurora Mk II's `hardpoint_module` is the canonical
+    # case — defined as an SItemPortDef on the ship entity with Type=Module
+    # but no default install. Without this pass we silently skip
+    # structurally-defined hardpoints, which violates the "never skip
+    # ports that exist on the ship" principle.
+    if ship_components_ports:
+        loadout_port_names = {e.get("portName", "") for e in loadout_entries}
+        impl_port_names = set()
+
+        def _collect_impl_names(node):
+            if isinstance(node, dict):
+                n = node.get("name", "")
+                if n:
+                    impl_port_names.add(n)
+                for v in node.values():
+                    _collect_impl_names(v)
+            elif isinstance(node, list):
+                for x in node:
+                    _collect_impl_names(x)
+
+        if impl_ports:
+            for p in impl_ports:
+                _collect_impl_names(p)
+
+        for p in ship_components_ports:
+            name = p.get("name", "")
+            if not name or name in loadout_port_names or name in impl_port_names:
+                continue
+            types = p.get("types", []) or []
+            if not types:
+                continue
+            flags_raw = p.get("flags", "") or ""
+            flags_lower = flags_raw.lower()
+            if "uneditable" in flags_lower or "invisible" in flags_lower:
+                continue
+            category = _classify_port(name, types[0], p)
+            if not category:
+                continue
+            hp = {
+                "PortName": name,
+                "MinSize": p.get("minSize", 0),
+                "MaxSize": p.get("maxSize", 0),
+                "Types": list(types),
+            }
+            if ship_tags:
+                hp["Tags"] = list(ship_tags)
+            rt = p.get("requiredPortTags", "") or ""
+            if rt:
+                hp["RequiredTags"] = rt.split()
+            pt = p.get("portTags", "") or ""
+            if pt:
+                hp["PortTags"] = pt.split()
+            hp["Uneditable"] = bool(p.get("uneditable", False))
+            _place(tree, category, hp)
+
     # Also ensure loadout entries with empty entities but known port categories are counted
     for entry in loadout_entries:
         port_name = entry.get("portName", "")
