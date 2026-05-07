@@ -162,7 +162,7 @@ The builders translate the game's component-based entity data into the flatter `
 
 ### Key formulas
 - **CargoGrid** Width/Depth/Height = `floor(interiorDimensions.{x,y,z} / 1.25)` (SC grid slot = 1.25 m).
-- **Ifcs Blade modifier** — applied from the referenced `SIFCSModifiersLegacy` record's `numbers`/`vectors` deltas (cached as `ctx.ifcs_modifiers`); no longer a hardcoded constant.
+- **Ifcs Blade modifier** — applied from the referenced `SIFCSModifiersLegacy` record's `numbers`/`vectors` deltas (cached as `ctx.ifcs_modifiers`).
 - **AfterBurner.Capacitor.RegenerationTime** = `round(Size / RegenPerSec, 1)`.
 - **Radar GroundSensitivity** = `max(0, IR_sensitivity + ground_add)` applied uniformly to all signals.
 - **Radar signal index map**: `0=EM, 1=IR, 2=CS, 3=DB, 4=RS, 5=ID, 6=Scan1, 7=Scan2`.
