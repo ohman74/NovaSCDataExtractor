@@ -88,9 +88,10 @@ Melee classification is already structural
 
 ## LOW — curated per-item allowlists
 
-Explicit `ClassName` exception sets used to match the reference dataset.
-Audited and kept; each is a candidate for collapsing into a structural
-rule once the upstream signal is identified.
+Explicit `ClassName` exception sets used to align certain edge-case
+items with the documented output shape. Audited and kept; each is a
+candidate for collapsing into a structural rule once the upstream
+signal is identified.
 
 | File | Set | Purpose |
 |---|---|---|

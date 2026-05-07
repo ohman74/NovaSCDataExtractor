@@ -111,19 +111,14 @@ Five JSON files in `output/<channel>/`, matching the documented reference shapes
 
 Plus `metadata.json` with `gameVersion` (public patch format `<patch>.<p4_changelist>` like `4.7.2.11715810` derived from the RSI launcher log; falls back to the build-manifest `Branch` when the log isn't available), `buildBranch`, `buildVersion`, `p4Change`, `buildDate`, `channel`, and per-dataset counts.
 
-## Output-format compatibility
+## Output format
 
 The output format is stable across runs and documented field-by-field in
-`DATA_SOURCES.md`. Local baseline files (`temp/reference/entry_*.json`,
-gitignored) are used during development to catch regressions; see
-"Reference files" below.
+`DATA_SOURCES.md`. A few intentional design choices to be aware of:
 
-### Known edge cases that intentionally differ from the baseline
-
-1. **DPS rounding** — `AMRS_LaserCannon_S4`, `APAR_MassDriver_S2`, `KLWE_MassDriver_S2` each differ by ±0.01 on one DPS value. Python's `round()` uses banker's rounding; matching the baseline would require IEEE 754 float-aware rounding that breaks other weapons.
-2. **Nested Loadout GUID** — `AEGS_Retaliator_Module_Rear_Cargo` has one deeply nested `ControlPanel` port whose `Loadout` GUID resolves to `RearCargo_Lift_exterior` for us vs `FrontCargo_Lift_Exterior` in the baseline (likely a data-version difference).
-3. **FPS catalogue size** — our `fps_equipment.json` emits **all** player-equippable FPS items including cosmetic skin variants (~496 records vs the baseline's ~174). Cosmetic variants are tagged inline with `CosmeticVariant: true` + `CosmeticVariantOf: <base_classname>` so consumers can hide or aggregate them. See `nova/builders/cosmetic.py`.
-4. **Ship/vehicle equipment surface area** — additional fields surfaced beyond the baseline (per-firing-mode `Recoil`, `Crafting`, magazine `Capacity`, `Aim` block, `PowerModes`, `Durability.Wear`, ammunition `Projectile`/`Impulse`/`ArmorPenetration`). All additive — existing fields preserved.
+1. **DPS rounding** — `AMRS_LaserCannon_S4`, `APAR_MassDriver_S2`, `KLWE_MassDriver_S2` each end up ±0.01 off some external sources for one DPS value. Python's `round()` uses banker's rounding; matching the other rounding mode would require IEEE 754 float-aware rounding that breaks other weapons.
+2. **FPS catalogue includes cosmetic variants** — `fps_equipment.json` emits **all** player-equippable FPS items including skin variants (`apar_special_ballistic_01_black02`, etc.). Cosmetic variants are tagged inline with `CosmeticVariant: true` + `CosmeticVariantOf: <base_classname>` so consumers can hide, aggregate, or expose them as desired. See `nova/builders/cosmetic.py`.
+3. **Extended equipment surface** — additional gameplay fields are surfaced on every ship/FPS item: per-firing-mode `Recoil`, `Crafting`, magazine `Capacity`, `Aim` block, `PowerModes`, `Durability.Wear`, ammunition `Projectile`/`Impulse`/`ArmorPenetration`. Additive only — existing fields preserved.
 
 ## How the `stdItem` format is built
 
@@ -176,23 +171,6 @@ Two distinct cosmetic systems run during build:
 
 - **Ship-level** (`nova/cosmetic_classifier.py`) — XML-diffs ships sharing the same `vehicleDefinition`; cosmetic-only siblings are filtered from emit. Writes `cache/cosmetic_variants.json` for downstream tools.
 - **Item-level** (`nova/builders/cosmetic.py`) — hashes a "gameplay signature" of each stdItem record (stripping cosmetic shell fields). Variants are *tagged* with `CosmeticVariant: true` + `CosmeticVariantOf: <base>` rather than dropped, so consumers can hide or aggregate them as desired.
-
-## Reference files
-
-Baseline comparison files live in `temp/reference/` (gitignored). They are
-optional — the build doesn't read them, only ad-hoc development scripts
-do. The five entries mirror the slice layout:
-
-| File | Maps to |
-|------|---------|
-| `entry_0.json` | `vehicle_metadata.json` |
-| `entry_1.json` | `vehicle_stats.json` |
-| `entry_2.json` | `vehicle_hardpoints.json` |
-| `entry_3.json` | `vehicle_equipment.json` |
-| `entry_4.json` | `fps_equipment.json` |
-
-The RSI ship-matrix is fetched live by `nova/matrix.py` and cached at
-`cache/rsi_flight_ready.json` (top-level, shared by Live + PTU).
 
 ## Caching
 
