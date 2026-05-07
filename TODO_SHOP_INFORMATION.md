@@ -1,6 +1,6 @@
 # Shop Information — UEX Integration Plan
 
-Add crowdsourced shop location and pricing data from [UEX API 2.0](https://uexcorp.space/api/documentation/) to the extractor pipeline. Fetch runs once per game-version update, alongside the existing `ships.json` / `ship_equipment.json` / `fps_*.json` refresh.
+Add crowdsourced shop location and pricing data from [UEX API 2.0](https://uexcorp.space/api/documentation/) to the extractor pipeline. Fetch runs once per game-version update, alongside the existing `vehicle_metadata.json` / `vehicle_stats.json` / `vehicle_hardpoints.json` / `vehicle_equipment.json` / `fps_equipment.json` refresh.
 
 ## Goal
 
@@ -12,7 +12,7 @@ Three new output files in `output/`:
 | `shop_fps_weapons.json` | FPS personal weapons and attachments |
 | `shop_fps_equipment.json` | FPS armor, clothing, consumables, gadgets |
 
-Keyed by Star Citizen entity UUID (same UUIDs already present in our `ship_equipment.json` / `fps_weapons.json` via `reference` field) so consumers can join without name matching.
+Keyed by Star Citizen entity UUID (same UUIDs already present in our `vehicle_equipment.json` / `fps_equipment.json` via `reference` field) so consumers can join without name matching.
 
 ## UEX category mapping
 
@@ -112,7 +112,7 @@ GET https://api.uexcorp.space/2.0/items_prices?id_category={N} # all shop listin
 
 ## Matching to Nova-extracted data
 
-UEX's `items.uuid` field matches the Star Citizen entity UUID used in our `ship_equipment.json` `reference` field (and FPS equivalents). UEX keeps its catalog current with live patch cycles, so UUID is a reliable primary join key.
+UEX's `items.uuid` field matches the Star Citizen entity UUID used in our `vehicle_equipment.json` `reference` field (and FPS equivalents). UEX keeps its catalog current with live patch cycles, so UUID is a reliable primary join key.
 
 **Join key**: `uuid`. Log (don't fuzzy-match) any UEX record missing a UUID so it surfaces as a data-quality signal rather than silently fanning out into slug/name heuristics.
 

@@ -17,7 +17,7 @@ py -m pip install -r requirements.txt
 py -m nova
 ```
 
-Output lands in `./output/`.
+Output lands in `./output/<channel>/`. With no `--channel` flag, the run extracts Live and then auto-runs PTU if a sibling PTU install has a newer build; each channel is also packaged as `output/<channel>.zip`.
 
 ## Configuration
 
@@ -35,14 +35,15 @@ Edit `nova_config.json`:
 ## CLI flags
 
 ```
-py -m nova                          # Extract everything
-py -m nova --only ship_equipment    # Extract one dataset
-py -m nova --channel PTU            # Use a different channel
-py -m nova --force                  # Clear cache and re-extract from Data.p4k
-py -m nova --config path.json       # Use a different config file
+py -m nova                              # Extract Live, then PTU if newer; package each channel as <channel>.zip
+py -m nova --only vehicle_equipment     # Extract one dataset
+py -m nova --channel PTU                # Pin to one channel (skips PTU auto-detection)
+py -m nova --no-package                 # Skip the per-channel .zip step
+py -m nova --force                      # Clear cache and re-extract from Data.p4k
+py -m nova --config path.json           # Use a different config file
 ```
 
-Datasets: `ships`, `vehicles`, `ship_equipment`, `vehicle_equipment`, `fps_weapons`, `fps_attachments`.
+Datasets (valid `--only` values): `vehicle_metadata`, `vehicle_stats`, `vehicle_hardpoints`, `vehicle_equipment`, `fps_equipment`.
 
 ## Pipeline
 
@@ -50,16 +51,20 @@ Datasets: `ships`, `vehicles`, `ship_equipment`, `vehicle_equipment`, `fps_weapo
 2. **Convert DCB** — `Game2.dcb` → `Game2.xml` (~2.4 GB of readable XML).
 3. **Collect entity files + scan for CryXML binaries** — curated ship/ground entity lists plus an automatic scan of known CryXML-binary directories (see note below).
 4. **Convert CryXML → text XML** — every collected binary file is run through `unforge.exe`. Idempotent: a magic-byte header check skips files that are already text.
-5. **Stream-parse `Game2.xml`** — single-pass `ET.iterparse` collects items, vehicles, GUIDs, manufacturers, ammo, inventory containers, gimbal modifiers.
-6. **Build datasets** — per-category builders map parsed records to the `stdItem` format.
-7. **Write JSON** to `./output/`.
+5. **Stream-parse `Game2.xml`** — single-pass `ET.iterparse` collects items, vehicles, GUIDs, manufacturers, ammo, inventory containers, gimbal modifiers, IFCS modifier records, crafting blueprints, GPP records, procedural recoil configs/modifiers, and weapon misfire defs.
+6. **Parse per-vehicle entity XML** — extracts `weaponPoolSize`, `shieldMaxItemCount`, and `inclusionMode` per ship.
+7. **Classify cosmetic ship variants** — `nova/cosmetic_classifier.py` groups ships by `vehicleDefinition` and identifies cosmetic-only siblings; emits `cache/cosmetic_variants.json`.
+8. **Walk ship-interior socpaks** — `nova/socpak_parser.py` follows each ship entity's `SVehicleObjectContainerParams.fileName` references into `.socpak` archives and counts `PersonalStorage_*` placements (used by the Storage builder for crew-locker entries not reachable through the loadout port chain).
+9. **Build datasets** — five builders project records into the reference output shapes via `nova/builders/slices.py`.
+10. **Write JSON** to `./output/<channel>/`, plus per-channel `output/<channel>.zip` unless `--no-package`.
 
-> **Note on CryXML-binary `.xml` files:** Several directories under `cache/Data/` contain files with `.xml` extension that are actually CryXML binary (magic bytes `CryXmlB`) and must be converted via `unforge.exe` before any XML parser can read them. Current known directories:
+> **Note on CryXML-binary `.xml` files:** Several directories under `cache/Data/` contain files with `.xml` extension that are actually CryXML binary (magic bytes `CryXmlB`) and must be converted via `unforge.exe` before any XML parser can read them. Current known directories (see `nova/extractor.py::CRYXML_BINARY_DIRS`):
 > - `Libs/Foundry/Records/entities/spaceships/`
-> - `Libs/Foundry/Records/entities/ground/`
+> - `Libs/Foundry/Records/entities/groundvehicles/`
 > - `Scripts/Entities/Vehicles/Implementations/Xml/` (hull mass, structural HP, thruster HP, port definitions)
+> - `Scripts/Loadouts/` (external loadout files referenced by `SItemPortLoadoutXMLParams.loadoutPath`)
 >
-> The extractor (`nova/extractor.py::CRYXML_BINARY_DIRS`) scans these automatically. If a new binary-XML directory is discovered, add it to that list. See `DATA_SOURCES.md` → "CryXML-binary files" for details.
+> The extractor scans these automatically. If a new binary-XML directory is discovered, add it to `CRYXML_BINARY_DIRS`. See `DATA_SOURCES.md` → "CryXML-binary files" for details.
 
 Fresh extraction from a 154 GB `Data.p4k` takes ~5–7 minutes. Cached reruns (after parser changes) take ~20–45 seconds.
 
@@ -67,26 +72,43 @@ Fresh extraction from a 154 GB `Data.p4k` takes ~5–7 minutes. Cached reruns (a
 
 ```
 nova/
-├── __main__.py              CLI entry point, orchestration
+├── __main__.py              CLI entry point + orchestration (Live + auto-PTU)
 ├── config.py                Config loader
 ├── tool_downloader.py       Fetches unp4k/unforge on first run
-├── extractor.py             unp4k + entity-file extraction
+├── extractor.py             unp4k + entity-file extraction + CRYXML_BINARY_DIRS scan
 ├── converter.py             DCB → XML, CryXML → XML
-├── dataforge_parser.py      Stream parse of Game2.xml
+├── dataforge_parser.py      Single-pass stream parse of Game2.xml
 ├── entity_parser.py         Per-entity XML parsing
 ├── vehicle_impl_parser.py   Vehicle loadout implementations
+├── cosmetic_classifier.py   Ship-level cosmetic-variant detection (XML-diff over siblings)
+├── socpak_parser.py         Ship-interior PersonalStorage walk via .socpak archives
 ├── utils.py                 Shared helpers (safe_float, parse_localization, ...)
 └── builders/
-    ├── stditem.py           The 2000-line heart: builds the stdItem block for every record
-    ├── ships.py             Ship dataset builder
-    ├── vehicles.py          Vehicle dataset builder
-    ├── ship_equipment.py    Ship equipment dataset builder
-    ├── vehicle_equipment.py Vehicle equipment dataset builder
-    ├── fps_weapons.py       FPS weapon builder
-    └── fps_attachments.py   FPS attachment builder
+    ├── slices.py            Projects merged ship+vehicle records into the 5 output shapes
+    ├── stditem.py           The 3300-line heart: builds the stdItem block for every record
+    ├── ships.py             Ship dataset builder + filter stack
+    ├── vehicles.py          Ground-vehicle dataset builder
+    ├── ship_equipment.py    Ship/vehicle stdItem records
+    ├── fps_weapons.py       FPS weapon stdItem records
+    ├── fps_attachments.py   FPS attachment stdItem records
+    └── cosmetic.py          Item-level cosmetic-variant detection (gameplay-signature)
 ```
 
-## Output-format compatibility (`ship_equipment.json`)
+## Output files
+
+Five JSON files in `output/<channel>/`, matching the documented reference shapes:
+
+| File | Reference | Content |
+|------|-----------|---------|
+| `vehicle_metadata.json` | entry_0 | Catalog metadata (scalar Cargo, Type, store/PU placeholders) |
+| `vehicle_stats.json` | entry_1 | Detailed spec (object Cargo, FlightCharacteristics, FuelManagement, …) |
+| `vehicle_hardpoints.json` | entry_2 | PortTags, Hull.Structure, Hardpoints |
+| `vehicle_equipment.json` | entry_3 | Ship/vehicle equipment stdItem records (~2888 items) |
+| `fps_equipment.json` | entry_4 | FPS weapons + attachments stdItem records (~174 items) |
+
+Plus `metadata.json` with game version + per-dataset counts.
+
+## Output-format compatibility (`vehicle_equipment.json`)
 
 The output format is stable across runs and documented field-by-field in
 `DATA_SOURCES.md`. Local baseline-comparison files (kept in `temp/` and
@@ -123,24 +145,24 @@ The builders translate the game's component-based entity data into the flatter `
 - `_CLASS_VALUE_OVERRIDES` dict wins first (ship-integrated components like `COOL_AEGS_S04_Reclaimer` → `Industrial`).
 - `name == "@LOC_PLACEHOLDER"` → Class = `"@LOC_PLACEHOLDER"`.
 - For component types (Shield/Cooler/PowerPlant/QuantumDrive/Radar/LifeSupportGenerator/JumpDrive/QuantumInterdictionGenerator) with a manufacturer → `MANUFACTURER_CLASS[code]`.
-- LifeSupport: `LFSP_S04_*` → `""`; others → `"Civilian"`.
+- LifeSupport: `attachDef.size == 4` → `""`; others → `"Civilian"`.
 - Otherwise `""`.
 
 ### Mass exclusions
 - Type in `_TYPES_NO_MASS` (FlightController, Armor.*, ShieldController, WheeledController, Turret.PDCTurret, SelfDestruct, UtilityTurret.MannedTurret, SalvageModifier, TurretBase.MannedTurret, Door.UNDEFINED, Flair_Cockpit.Flair_Static, WeaponGun.UNDEFINED, Paints.Personal) → skip.
 - Base in `_BASE_TYPES_NO_MASS` (Paints) → skip.
 - Volume=1 placeholder for Turret.* / Flair_Cockpit.Flair_Static / ToolArm.UNDEFINED → skip.
-- Container.Cargo mining pods / TMBL_Cyclone_Module_* / *_CargoGrid_Main → skip.
-- GroundVehicleMissileLauncher non-Storm → skip.
-- Turret.TopTurret/BottomTurret remote variants → skip.
+- Container.Cargo mining pods (ResourceContainer-only, no inventory) / `attachDef.tags == "TMBL_Cyclone_Module"` / placeholder CargoGrid_Main → skip.
+- GroundVehicleMissileLauncher with non-placeholder `displayName` (vehicle-integrated rack) → skip.
+- Turret.TopTurret/BottomTurret with `"Remote"` in `attachDef.name` → skip.
 - Module.UNDEFINED placeholder-volume → skip.
-- `Salvage_Head_*` → skip.
+- Salvage heads (no `SDistortionParams` component) → skip.
 - `_MISSILERACK_WITHOUT_MASS` blocklist (2 items).
 - `_MASS_FORCE_INCLUDE` allowlist wins (10 items).
 
 ### Key formulas
 - **CargoGrid** Width/Depth/Height = `floor(interiorDimensions.{x,y,z} / 1.25)` (SC grid slot = 1.25 m).
-- **Ifcs Blade HND** modifier: `MaxSpeed-25, SCM-8, Boost±10, Pitch+1, Yaw+1, Roll+2`. Blade SPD is the inverse.
+- **Ifcs Blade modifier** — applied from the referenced `SIFCSModifiersLegacy` record's `numbers`/`vectors` deltas (cached as `ctx.ifcs_modifiers`); no longer a hardcoded constant.
 - **AfterBurner.Capacitor.RegenerationTime** = `round(Size / RegenPerSec, 1)`.
 - **Radar GroundSensitivity** = `max(0, IR_sensitivity + ground_add)` applied uniformly to all signals.
 - **Radar signal index map**: `0=EM, 1=IR, 2=CS, 3=DB, 4=RS, 5=ID, 6=Scan1, 7=Scan2`.
@@ -152,28 +174,26 @@ The builders translate the game's component-based entity data into the flatter `
 - **Weapon DPS** = `(impact + detonation) × pellets × chargeDmgMult × RPM / 60`.
 - **VehicleMod mining buffs** (type `UNDEFINED.Gun`): 4-entry zero-filled `RegenBuffModifier` + `SalvageBuffModifier`.
 
-## Comparing against the reference
+## Cosmetic-variant handling
 
-`compare.py` is the regression harness used during development:
+Two distinct cosmetic systems run during build:
 
-```bat
-py compare.py                       REM summary of per-field match rates
-py compare.py --field Weapon        REM show mismatching items for one field
-py compare.py ITEM_CLASS_NAME       REM deep diff on a single item
-py compare.py --missing             REM list all items with any mismatch
-```
+- **Ship-level** (`nova/cosmetic_classifier.py`) — XML-diffs ships sharing the same `vehicleDefinition`; cosmetic-only siblings are filtered from emit. Writes `cache/cosmetic_variants.json` for downstream tools.
+- **Item-level** (`nova/builders/cosmetic.py`) — hashes a "gameplay signature" of each stdItem record (stripping cosmetic shell fields). Variants are *tagged* with `CosmeticVariant: true` + `CosmeticVariantOf: <base>` rather than dropped, so consumers can hide or aggregate them as desired.
 
-String comparisons are whitespace-insensitive (leading/trailing only) via the `eq()` helper.
+## Reference files
 
-Reference files live in `temp/reference_data_new/`:
+Reference files live in `temp/reference_data_new/` (gitignored):
 
 | File | Content |
 |------|---------|
-| `entry_0.json` | Ship metadata (store, progress tracker, PU info) |
-| `entry_1.json` | Ship stats (201 ships: FuelManagement, FlightCharacteristics, Armor, ...) |
-| `entry_2.json` | Ship hardpoints (201 ships: port tree with Types, Hull.Structure) |
-| `entry_3.json` | **Ship equipment stdItem (2888 items)** — primary match target |
+| `entry_0.json` | Vehicle metadata (catalog) |
+| `entry_1.json` | Vehicle stats |
+| `entry_2.json` | Vehicle hardpoints |
+| `entry_3.json` | **Ship/vehicle equipment stdItem (2888 items)** — primary match target |
 | `entry_4.json` | FPS equipment stdItem (174 items) |
+
+Development-time comparison harnesses live in `temp/` (gitignored): `compare_matrix.py` (vs RSI ship matrix), `compare_equipment.py`, `compare_vehicles.py`, plus per-field `*_diffs.py` tools and `find_cosmetic_dupes.py`.
 
 ## Caching
 
@@ -186,6 +206,11 @@ First run takes ~5–7 min to unpack and convert the DataForge. Parser cache fil
 - `parsed_manufacturers.json` — manufacturer records
 - `parsed_guids.json` — GUID → className map
 - `parsed_gimbal_modifiers.json` — weapon gimbal modifier records
+- `parsed_ifcs_modifiers.json` — SIFCSModifiersLegacy records by GUID
+- `parsed_crafting.json` — Crafting blueprints + GPP records
+- `parsed_recoil.json` — procedural-recoil configs/modifiers + weapon recoil configs + misfire defs
+- `cosmetic_variants.json` — ship ClassNames flagged by the cosmetic classifier
+- `parsed_ship_storage.json` — per-ship interior PersonalStorage placement counts
 
 Delete `parsed_items.json` + `parsed_ammo.json` after changes to `dataforge_parser.py` to force re-parse. `--force` wipes the entire cache and re-unpacks.
 
@@ -194,4 +219,5 @@ Delete `parsed_items.json` + `parsed_ammo.json` after changes to `dataforge_pars
 - Both `fireActions` scope and nested `elem.iter()` matter: the parser restricts fire-action iteration to `<fireActions>` so a reference `SWeaponActionFireSingleParams` inside `<aimAction>` isn't double-counted.
 - `ET.iterparse` with stream-clear is used for `Game2.xml` to stay within memory. Elements inside recognized record types (AmmoParams, EntityClassDefinition, etc.) are preserved via an `in_record` flag; anything else is cleared immediately.
 - CryXML binary entity files are converted to text XML in `extractor.py` before parsing.
-- The reference format uses several ref-specific conventions that aren't derivable from raw data (e.g. pitchAxis angle-limit inheritance, Blade modifier deltas, specific className allow/block lists). These are captured as constants at the top of `builders/stditem.py`.
+- The reference format uses several ref-specific conventions that aren't derivable from raw data (e.g. pitchAxis angle-limit inheritance, specific className allow/block lists). These are captured as constants at the top of `builders/stditem.py`.
+- See `NAME_FILTERS.md` for the audit of remaining name-based filters and their refactor status — the project enforces structural classification per `.claude/CLAUDE.md`.

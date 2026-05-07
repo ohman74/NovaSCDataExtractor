@@ -26,8 +26,9 @@ These are listed in `nova/extractor.py::CRYXML_BINARY_DIRS` and scanned automati
 | Path (under `cache/Data/`) | Purpose |
 |---|---|
 | `Libs/Foundry/Records/entities/spaceships/` | Ship entity definitions (ports, vehicle params, components) |
-| `Libs/Foundry/Records/entities/ground/` | Ground-vehicle entity definitions |
+| `Libs/Foundry/Records/entities/groundvehicles/` | Ground-vehicle entity definitions |
 | `Scripts/Entities/Vehicles/Implementations/Xml/` | Vehicle implementation XMLs (hull mass, structural HP tree, thruster HP, port definitions) |
+| `Scripts/Loadouts/` | External loadout files referenced by `SItemPortLoadoutXMLParams.loadoutPath` |
 
 If a new source dir of CryXML-binary files is added later, append it to `CRYXML_BINARY_DIRS` — the scan-and-convert step will pick them up on the next run. Don't try to parse a binary .xml directly; always run the conversion first.
 

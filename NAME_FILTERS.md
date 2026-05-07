@@ -56,13 +56,13 @@ same impl; `ORIG_600i_Executive_Edition` — classifier flags as FUNCTIONAL
 because of real landingSystem / inventoryContainer / Exec turret
 differences, retained per product decision).
 
-Audit harnesses in place:
-- `py compare_matrix.py` — diffs `output/vehicle_metadata.json` against
+Audit harnesses in place (live in `temp/`, gitignored — invoked from repo root):
+- `py temp/compare_matrix.py` — diffs `output/vehicle_metadata.json` against
   RSI ship-matrix flight-ready set. 0 gaps / 0 anomalies at time of save.
-- `py find_cosmetic_dupes.py` — CLI over `nova/cosmetic_classifier.py`.
+- `py temp/find_cosmetic_dupes.py` — CLI over `nova/cosmetic_classifier.py`.
   Thin wrapper around the build-integrated logic.
 - Algorithmic cosmetic-variant exchange: extractor writes
-  `cache/cosmetic_variants.json`; `compare_matrix.py` reads it and
+  `cache/cosmetic_variants.json`; `temp/compare_matrix.py` reads it and
   auto-excludes matrix SKUs covered by filtered cosmetic variants (so no
   hardcoded cosmetic-SKU ignore list needed).
 
@@ -137,7 +137,7 @@ Remaining open items:
 
 ## Audit harness — latest baseline
 
-Run `py compare_matrix.py` to diff `output/vehicle_metadata.json` against the
+Run `py temp/compare_matrix.py` to diff `output/vehicle_metadata.json` against the
 RSI pledge-store's flight-ready set (cached in `cache/rsi_flight_ready.json`).
 At session pause:
 
