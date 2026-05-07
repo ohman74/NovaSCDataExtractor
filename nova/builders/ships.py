@@ -4513,6 +4513,7 @@ def _build_cm_entry(port_name, entity_class, item_record, ctx):
 
         # Ammo data for countermeasure
         ammo_comp = comps.get("ammo", {})
+        cm_type = None
         if ammo_comp:
             # Reference emits Ammunition as float (48.0 not 48).
             entry["Ammunition"] = float(ammo_comp.get("maxAmmoCount", 0))
@@ -4521,15 +4522,21 @@ def _build_cm_entry(port_name, entity_class, item_record, ctx):
                 entry["Speed"] = ammo_data.get("speed", 0)
                 lifetime = ammo_data.get("lifetime", 0)
                 entry["Range"] = ammo_data.get("speed", 0) * lifetime
+                # Structural type signal — `AmmoParams.counterMeasure` records
+                # carry `counterMeasureType` = "Chaff" | "Flare". Maps to the
+                # gameplay terms "Noise" (radar chaff) and "Decoy" (IR flare).
+                # 170/170 CountermeasureLauncher items in the current corpus
+                # populate this field; replaces a className-substring fallback.
+                cmt = ammo_data.get("counterMeasureType")
+                if cmt == "Chaff":
+                    cm_type = "Noise"
+                elif cmt == "Flare":
+                    cm_type = "Decoy"
 
-        # Type from item type
-        item_type = ad.get("type", "")
-        if "noise" in entity_class.lower() or "chaff" in entity_class.lower():
-            entry["Type"] = "Noise"
-        elif "flare" in entity_class.lower() or "decoy" in entity_class.lower():
-            entry["Type"] = "Decoy"
+        if cm_type:
+            entry["Type"] = cm_type
         else:
-            entry["Type"] = item_type
+            entry["Type"] = ad.get("type", "")
 
     return entry
 
