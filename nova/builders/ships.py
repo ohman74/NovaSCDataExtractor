@@ -4049,6 +4049,14 @@ def _add_impl_only_ports(tree, impl_ports, loadout_port_names):
                 hp["Flags"] = list(flags_raw)
             elif isinstance(flags_raw, str) and flags_raw:
                 hp["Flags"] = [f for f in flags_raw.split() if f]
+            # PortTags is the port's own offered tags (e.g. Idris nose
+            # exposes `AEGS_Idris_Nose`) — items that carry the matching
+            # `$AEGS_Idris_Nose` in their `requiredTags` only fit because
+            # of this. Without it, downstream compatibility checks have
+            # no anchor to match item-side requiredTags against.
+            pt = port.get("portTags", "")
+            if pt:
+                hp["PortTags"] = pt.split()
             rt = port.get("requiredPortTags", "")
             if rt:
                 hp["RequiredTags"] = rt.split()
@@ -4253,13 +4261,6 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
             else:
                 entry["Flags"] = list(raw)
 
-        # RequiredTags from impl XML (`requiredTags` attribute on ItemPort).
-        # Used by configurable slots to constrain which items can install
-        # (e.g. F7C ball-turret slot requires `$ANVL_Hornet_Base`).
-        rt = port_def.get("requiredPortTags", "") if port_def else ""
-        if rt:
-            entry["RequiredTags"] = rt.split()
-
         # Gimballed / Turret / Fixed flags: Turret.GunTurret mounts are gimbals
         # (pilot aims, mount tracks) -> Gimballed:true. Other Turret.* /
         # TurretBase.* types (BallTurret/NoseMounted/Canard/Top/Bottom/PDC/
@@ -4418,7 +4419,8 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
         entry["Loadout"] = entity_class
     else:
         # Empty mount slot (no item installed): reference still emits port
-        # definition (MinSize/MaxSize/Types/Flags). Fill from port_def only.
+        # definition (MinSize/MaxSize/Types/Flags/PortTags/RequiredTags).
+        # Fill from port_def only.
         if port_def:
             mn = port_def.get("minSize")
             mx = port_def.get("maxSize")
@@ -4434,6 +4436,9 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
                 entry["Flags"] = list(flags_raw)
             elif isinstance(flags_raw, str) and flags_raw:
                 entry["Flags"] = [f for f in flags_raw.split() if f]
+            pt = port_def.get("portTags", "")
+            if pt:
+                entry["PortTags"] = pt.split()
             rt = port_def.get("requiredPortTags", "")
             if rt:
                 entry["RequiredTags"] = rt.split()
