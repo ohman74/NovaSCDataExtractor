@@ -160,12 +160,15 @@ def _merge_ships_and_vehicles(ctx):
     # Tag matrix-matched ships with FlightReady. The matched matrix entry
     # is also stashed on each record (underscore-prefixed → not projected
     # into output) for downstream enrichment passes (Store / Career / etc.).
-    # `match_ships` returns an empty dict when no matrix is available,
-    # except for the hardcoded in-game earnable allow-list which is always
-    # tagged.
+    # In-game-earnable variants inherit FlightReady from a matrix-matched
+    # sibling that shares their `vehicleDefinition` family file.
     from ..matrix import match_ships
     matrix_data = getattr(ctx, "matrix", None)
-    matches = match_ships(matrix_data, result)
+    vehicle_defs = {
+        cn: (rec.get("vehicle") or {}).get("vehicleDefinition", "")
+        for cn, rec in ctx.vehicles.items()
+    }
+    matches = match_ships(matrix_data, result, vehicle_defs=vehicle_defs)
     for r in result:
         entry = matches.get(r["ClassName"])
         if entry is None:

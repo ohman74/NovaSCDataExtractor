@@ -142,68 +142,15 @@ _CLASSNAME_TO_MATRIX_NAME = {
     "DRAK_Dragonfly_Yellow":            "Dragonfly Yellowjacket",
 }
 
-# ClassNames legitimately in our output but absent from the RSI ship-matrix.
-# All are earnable in-game ships — not on the pledge store. They get
-# `FlightReady: true` even without a matrix match.
-_INGAME_FLIGHT_READY = frozenset({
-    # Wikelo's Web — Collector variants
-    "AEGS_Idris_P_Collector_Military",
-    "AEGS_Sabre_Firebird_Collector_Milt",
-    "AEGS_Sabre_Peregrine_Collector_Competition",
-    "ANVL_Asgard_Collector_Military",
-    "ANVL_Hornet_F7_Mk2_Collector_Mod",
-    "ANVL_Lightning_F8C_Collector_Military",
-    "ANVL_Lightning_F8C_Collector_Stealth",
-    "ANVL_Terrapin_Medic_Collector_Medic",
-    "ARGO_RAFT_Collector_Indust",
-    "CRUS_Intrepid_Collector_Indust",
-    "CRUS_Spirit_C1_Civilian",
-    "CRUS_Starfighter_Inferno_Collector_Military",
-    "CRUS_Starfighter_Ion_Collector_Stealth",
-    "CRUS_Starlifter_A2_Collector_Military",
-    "DRAK_Golem_Collector_Indust",
-    "ESPR_Prowler_Utility_Collector_Indust",
-    "KRIG_L21_Wolf_Collector_Military",
-    "KRIG_L21_Wolf_Collector_Stealth",
-    "MISC_Fortune_Collector_Industrial",
-    "MISC_Prospector_Collector_Indust",
-    "MISC_Starlancer_Max_Collector_Indust",
-    "MISC_Starlancer_TAC_Collector_Military",
-    "MRAI_Guardian_Military",
-    "MRAI_Guardian_MX_Collector_Military",
-    "MRAI_Guardian_QI_Collector_Indust",
-    "MRAI_Pulse_Collector_Civ",
-    "RSI_Apollo_Triage_Collector_Stealth",
-    "RSI_Constellation_Taurus_Military",
-    "RSI_Meteor_Collector_Stealth",
-    "RSI_Scorpius_Stealth",
-    "RSI_Ursa_Medivac_Stealth",
-    "RSI_Zeus_ES_Collector_Indust",
-    "XIAN_Nox_Collector_Mod",
-    # Teach's Ship Shop — Nyx
-    "AEGS_Reclaimer_Teach",
-    "ARGO_MOLE_Teach",
-    "CNOU_Nomad_Teach",
-    "DRAK_Golem_Teach",
-    "DRAK_Vulture_Teach",
-    "MISC_Fortune_Teach",
-    "MISC_Starfarer_Teach",
-    # Pyro faction — PYAM Exec variants
-    "ANVL_Hornet_F7A_Mk2_Exec_Military",
-    "ANVL_Hornet_F7A_Mk2_Exec_Stealth",
-    "ANVL_Lightning_F8C_Exec_Military",
-    "ANVL_Lightning_F8C_Exec_Stealth",
-    "DRAK_Corsair_Exec_Military",
-    "DRAK_Corsair_Exec_StealthIndustrial",
-    "DRAK_Cutlass_Black_Exec_Military",
-    "DRAK_Cutlass_Black_Exec_Stealth",
-    "GAMA_Syulen_Exec_Military",
-    "GAMA_Syulen_Exec_Stealth",
-    "RSI_Meteor_Collector_Military",        # Pyro Exec despite _Collector_ naming
-    # Other in-game earnables
-    "AEGS_Gladius_Dunlevy",                 # recruitment reward
-    "ANVL_Hornet_F7CM_Mk2_Heartseeker",     # in-game Mk II Heartseeker variant
-})
+# In-game earnable ships (Wikelo Collector, Teach's Shop, Pyro Exec,
+# recruitment rewards) are absent from the RSI ship-matrix because the
+# matrix only lists pledge-store SKUs. They are tagged FlightReady=true
+# structurally instead, by propagating across `vehicleDefinition` clusters:
+# CIG models all variants of a ship family (pledge SKUs, in-game variants,
+# paint variants, AI templates) under the same vehicleDefinition XML path,
+# so a matrix-matched flight-ready sibling acts as a structural witness for
+# every other variant in the same cluster. See `_propagate_via_vehicle_def`
+# below.
 
 # Short manufacturer name our Name field uses as a prefix, per mfr code.
 # (Normalized: lowercase, non-alphanumerics → single space.)
@@ -253,13 +200,6 @@ _NAME_PREFIX_TO_MFR = {
     "vanduul":  "VNCL",
     "aopoa":    "XNAA",
 }
-
-# Sentinel matrix entry for in-game earnables (not on pledge store).
-_INGAME_ENTRY = {
-    "production_status": "flight-ready",
-    "_source": "ingame",
-}
-
 
 def _normalize(name, mfr_code=""):
     """Lowercase, strip known mfr short-name prefix, strip noise, canonicalise.
@@ -315,25 +255,56 @@ def _mfr_code_for_ours(class_name, name):
     return MFR_ALIASES.get(prefix, prefix)
 
 
-def match_ships(matrix, records):
+def _propagate_via_vehicle_def(matches, records, vehicle_defs):
+    """Propagate flight-ready status across vehicleDefinition clusters.
+
+    CIG models ship variants (pledge SKUs, in-game-earnable variants, paint
+    variants, AI templates) under a shared `vehicleDefinition` XML file.
+    Matrix matching naturally catches the pledge SKU of each family;
+    propagation extends that to in-game-earnable siblings without a manual
+    allowlist.
+
+    Rule: a record with no direct matrix match inherits the matrix entry of
+    a flight-ready sibling that shares its `vehicleDefinition`. Direct
+    matches are never overridden, so an in-concept variant separately
+    listed in matrix (e.g. Zeus Mk II MR with XML stub) keeps its
+    in-concept status even when its cluster has flight-ready siblings.
+    """
+    flight_ready_by_def = {}
+    for cn, entry in matches.items():
+        if entry.get("production_status") != "flight-ready":
+            continue
+        vd = (vehicle_defs.get(cn) or "").lower()
+        if vd:
+            flight_ready_by_def.setdefault(vd, entry)
+
+    for r in records:
+        cn = r.get("ClassName", "")
+        if not cn or cn in matches:
+            continue
+        vd = (vehicle_defs.get(cn) or "").lower()
+        if vd and vd in flight_ready_by_def:
+            matches[cn] = flight_ready_by_def[vd]
+
+
+def match_ships(matrix, records, vehicle_defs=None):
     """Match our ship records against matrix entries.
 
     Args:
         matrix: list of normalized matrix entries (from fetch/load_matrix)
         records: iterable of dicts with at least `ClassName` and `Name` keys
+        vehicle_defs: optional {ClassName: vehicleDefinition path} map. When
+            provided, enables vehicleDefinition-cluster propagation so
+            in-game-earnable variants (Wikelo Collector, Pyro Exec, Teach's
+            Shop, recruitment rewards) inherit flight-ready status from a
+            matrix-matched sibling in the same family.
 
     Returns:
-        Dict {ClassName: matrix_entry}. Includes:
-        - matrix-matched ships (entry has all matrix fields)
-        - in-game earnable ships not in matrix (entry is the _INGAME_ENTRY
-          sentinel — production_status="flight-ready", _source="ingame")
-
-        Records not in matrix and not in the in-game allow-list are not
-        present in the result (caller treats them as "no signal").
+        Dict {ClassName: matrix_entry}. Records not matched and not
+        propagated are absent from the result (caller treats as no signal).
     """
     if not matrix:
-        # Still tag the in-game allow-list even when matrix fetch failed.
-        return {cn: _INGAME_ENTRY for cn in _INGAME_FLIGHT_READY}
+        return {}
 
     matrix_exact = {}
     matrix_fallback = {}
@@ -375,14 +346,7 @@ def match_ships(matrix, records):
             matches[cn] = entry
             continue
 
-        # Not in matrix, but a known in-game earnable.
-        if cn in _INGAME_FLIGHT_READY:
-            matches[cn] = _INGAME_ENTRY
-
-    # Also tag earnables that didn't appear in `records` (defensive — they
-    # should always appear, but if a build filters them upstream we still
-    # surface the tag for downstream tools).
-    for cn in _INGAME_FLIGHT_READY:
-        matches.setdefault(cn, _INGAME_ENTRY)
+    if vehicle_defs:
+        _propagate_via_vehicle_def(matches, records, vehicle_defs)
 
     return matches
