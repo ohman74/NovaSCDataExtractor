@@ -1104,6 +1104,10 @@ def _parse_vehicle_params(comp):
         "isGravlevVehicle": safe_bool(comp.get("isGravlevVehicle")),
         "manufacturerGuid": comp.get("manufacturer", ""),
         "vehicleDefinition": comp.get("vehicleDefinition", ""),
+        # Inline Modification name (e.g. "Zeus_CL", "F7C_Mk2"). Selects an
+        # inline <Modification> block from the impl XML to apply per-variant
+        # overrides (skipPart toggles, port renames, size changes).
+        "modification": comp.get("modification", ""),
         # Penetration multipliers for Hull.PenetrationDamageMultiplier
         "fusePenetrationDamageMultiplier": safe_float(comp.get("fusePenetrationDamageMultiplier", "1")),
         "componentPenetrationDamageMultiplier": safe_float(comp.get("componentPenetrationDamageMultiplier", "1")),

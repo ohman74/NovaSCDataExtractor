@@ -1120,6 +1120,10 @@ These are applied as deltas to IFCS fields for items with "_Blade_HND" or "_Blad
 
 5. **Nested Component Parsing**: Generic `_elem_to_dict()` captures unknown component types for extensibility. Known types (SCItemWeaponComponentParams, SHealthComponentParams, etc.) are parsed explicitly; unknown types fall through to generic dict capture.
 
+6. **Vehicle Implementation Modifications**: The vehicle-impl XMLs (`Scripts/Entities/Vehicles/Implementations/Xml/*.xml`) carry a per-variant `<Modifications>` block at the root. Each `<Modification name="...">` lists `<Elem idRef="..." name="..." value="..." />` overrides that target Parts by their `id` attribute. The vehicle entity's `VehicleComponentParams@modification` selects which block applies (e.g. RSI Zeus uses `Zeus_CL` / `Zeus_MR` / `Zeus_ST` over a shared `RSI_Zeus.xml`; F7C Mk2 uses `F7C_Mk2` over `ANVL_Hornet_F7A.xml`). `vehicle_impl_parser._apply_inline_modification` walks the parsed port tree and applies each elem (toggling `skipPart`, renaming ports, adjusting size). Without this, variant-only ports (Zeus CL tractor beam, F7C Mk2 Mk2-tag-required ports) wouldn't surface in the output.
+
+7. **Ship-level PortTags Source**: For per-ship `PortTags` in `vehicle_hardpoints.json`, the entity XML's `SItemPortContainerComponentParams@PortTags` is authoritative — captured by the dataforge parser as `components.shipPortTags`. The vehicle-impl XML's `<Vehicle@itemPortTags>` is used only as a fallback, since the base impl's value is stale for variants (e.g. F7C Mk2 uses the F7A impl whose `itemPortTags="Anvil Hornet F7A"` doesn't reflect Mk2's actual tag set).
+
 ---
 
 This reference documents all known field sources as of the current codebase. Developers adding new fields should follow the same pattern: extract from XML component, parse in dataforge_parser or entity_parser, build in the appropriate builder function, and document the source path and transformation logic here.

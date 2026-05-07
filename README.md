@@ -47,16 +47,18 @@ Datasets (valid `--only` values): `vehicle_metadata`, `vehicle_stats`, `vehicle_
 
 ## Pipeline
 
-1. **Extract** — `unp4k` unpacks `Data.p4k` into `./cache/`.
-2. **Convert DCB** — `Game2.dcb` → `Game2.xml` (~2.4 GB of readable XML).
-3. **Collect entity files + scan for CryXML binaries** — curated ship/ground entity lists plus an automatic scan of known CryXML-binary directories (see note below).
-4. **Convert CryXML → text XML** — every collected binary file is run through `unforge.exe`. Idempotent: a magic-byte header check skips files that are already text.
-5. **Stream-parse `Game2.xml`** — single-pass `ET.iterparse` collects items, vehicles, GUIDs, manufacturers, ammo, inventory containers, gimbal modifiers, IFCS modifier records, crafting blueprints, GPP records, procedural recoil configs/modifiers, and weapon misfire defs.
-6. **Parse per-vehicle entity XML** — extracts `weaponPoolSize`, `shieldMaxItemCount`, and `inclusionMode` per ship.
-7. **Classify cosmetic ship variants** — `nova/cosmetic_classifier.py` groups ships by `vehicleDefinition` and identifies cosmetic-only siblings; emits `cache/cosmetic_variants.json`.
-8. **Walk ship-interior socpaks** — `nova/socpak_parser.py` follows each ship entity's `SVehicleObjectContainerParams.fileName` references into `.socpak` archives and counts `PersonalStorage_*` placements (used by the Storage builder for crew-locker entries not reachable through the loadout port chain).
-9. **Build datasets** — five builders project records into the reference output shapes via `nova/builders/slices.py`.
-10. **Write JSON** to `./output/<channel>/`, plus per-channel `output/<channel>.zip` unless `--no-package`.
+1. **Fetch RSI ship-matrix** — `nova/matrix.py` GETs the public `https://robertsspaceindustries.com/ship-matrix/index` once at the start and caches it to `cache/rsi_flight_ready.json`. The matrix is channel-agnostic — Live and PTU runs share the same file. Falls back to existing cache on network failure; build continues without tags if neither works.
+2. **Extract** — `unp4k` unpacks `Data.p4k` into `./cache/<channel>/`.
+3. **Convert DCB** — `Game2.dcb` → per-record XML files under `Libs/Foundry/Records/`; the converter assembles them into `Game2.xml` (~2.4 GB) for the streaming parser. Both legacy single-XML output and the v4.0.83+ folder layout are supported.
+4. **Collect entity files + scan for CryXML binaries** — curated ship/ground entity lists plus an automatic scan of known CryXML-binary directories (see note below).
+5. **Convert CryXML → text XML** — every collected binary file is run through `unforge.exe`. Idempotent: a magic-byte header check skips files that are already text.
+6. **Stream-parse `Game2.xml`** — single-pass `ET.iterparse` collects items, vehicles, GUIDs, manufacturers, ammo, inventory containers, gimbal modifiers, IFCS modifier records, crafting blueprints, GPP records, procedural recoil configs/modifiers, and weapon misfire defs.
+7. **Parse per-vehicle entity XML** — extracts `weaponPoolSize`, `shieldMaxItemCount`, and `inclusionMode` per ship.
+8. **Parse vehicle implementation XMLs** — extracts ports, hull HP, mass, and inline `<Modifications>` blocks. `get_vehicle_impl_data` applies the entity's `VehicleComponentParams.modification` (e.g. `Zeus_CL`, `F7C_Mk2`) on top of the base impl, toggling `skipPart` and renaming variant-specific ports.
+9. **Classify cosmetic ship variants** — `nova/cosmetic_classifier.py` groups ships by `vehicleDefinition` and identifies cosmetic-only siblings; emits `cache/cosmetic_variants.json`.
+10. **Walk ship-interior socpaks** — `nova/socpak_parser.py` follows each ship entity's `SVehicleObjectContainerParams.fileName` references into `.socpak` archives and counts `PersonalStorage_*` placements (used by the Storage builder for crew-locker entries not reachable through the loadout port chain).
+11. **Build datasets** — five builders project records into the reference output shapes via `nova/builders/slices.py`. The slice merger tags each ship with `FlightReady` (matrix flight-ready / in-game earnable) and `Thumbnail` (matrix `store_thumb_listing_small` URL) when matched.
+12. **Write JSON** to `./output/<channel>/`, plus per-channel `output/<channel>.zip` unless `--no-package`.
 
 > **Note on CryXML-binary `.xml` files:** Several directories under `cache/Data/` contain files with `.xml` extension that are actually CryXML binary (magic bytes `CryXmlB`) and must be converted via `unforge.exe` before any XML parser can read them. Current known directories (see `nova/extractor.py::CRYXML_BINARY_DIRS`):
 > - `Libs/Foundry/Records/entities/spaceships/`
@@ -83,6 +85,7 @@ nova/
 ├── cosmetic_classifier.py   Ship-level cosmetic-variant detection (XML-diff over siblings)
 ├── socpak_parser.py         Ship-interior PersonalStorage walk via .socpak archives
 ├── utils.py                 Shared helpers (safe_float, parse_localization, ...)
+├── matrix.py               RSI ship-matrix fetcher + matcher (FlightReady / Thumbnail tags)
 └── builders/
     ├── slices.py            Projects merged ship+vehicle records into the 5 output shapes
     ├── stditem.py           The 3300-line heart: builds the stdItem block for every record
@@ -100,13 +103,13 @@ Five JSON files in `output/<channel>/`, matching the documented reference shapes
 
 | File | Reference | Content |
 |------|-----------|---------|
-| `vehicle_metadata.json` | entry_0 | Catalog metadata (scalar Cargo, Type, store/PU placeholders) |
-| `vehicle_stats.json` | entry_1 | Detailed spec (object Cargo, FlightCharacteristics, FuelManagement, …) |
-| `vehicle_hardpoints.json` | entry_2 | PortTags, Hull.Structure, Hardpoints |
+| `vehicle_metadata.json` | entry_0 | Catalog metadata (scalar Cargo, Type, store/PU placeholders, FlightReady, Thumbnail) |
+| `vehicle_stats.json` | entry_1 | Detailed spec (object Cargo, FlightCharacteristics, FuelManagement, FlightReady, …) |
+| `vehicle_hardpoints.json` | entry_2 | PortTags (from `SItemPortContainerComponentParams.PortTags`), Hull.Structure, Hardpoints with per-port `RequiredTags`, FlightReady |
 | `vehicle_equipment.json` | entry_3 | Ship/vehicle equipment stdItem records (~2888 items) |
 | `fps_equipment.json` | entry_4 | FPS weapons + attachments stdItem records (~174 items) |
 
-Plus `metadata.json` with game version + per-dataset counts.
+Plus `metadata.json` with `gameVersion` (public patch format `<patch>.<p4_changelist>` like `4.7.2.11715810` derived from the RSI launcher log; falls back to the build-manifest `Branch` when the log isn't available), `buildBranch`, `buildVersion`, `p4Change`, `buildDate`, `channel`, and per-dataset counts.
 
 ## Output-format compatibility (`vehicle_equipment.json`)
 
@@ -197,22 +200,23 @@ Development-time comparison harnesses live in `temp/` (gitignored): `compare_mat
 
 ## Caching
 
-First run takes ~5–7 min to unpack and convert the DataForge. Parser cache files land in `./cache/`:
+First run takes ~5–7 min to unpack and convert the DataForge. Cache files land per-channel in `./cache/<channel>/` plus one shared file at `./cache/`:
 
-- `parsed_items.json` — all entity records
-- `parsed_vehicles.json` — vehicle records
-- `parsed_ammo.json` — AmmoParams by GUID
-- `parsed_inventory.json` — InventoryContainer by GUID
-- `parsed_manufacturers.json` — manufacturer records
-- `parsed_guids.json` — GUID → className map
-- `parsed_gimbal_modifiers.json` — weapon gimbal modifier records
-- `parsed_ifcs_modifiers.json` — SIFCSModifiersLegacy records by GUID
-- `parsed_crafting.json` — Crafting blueprints + GPP records
-- `parsed_recoil.json` — procedural-recoil configs/modifiers + weapon recoil configs + misfire defs
-- `cosmetic_variants.json` — ship ClassNames flagged by the cosmetic classifier
-- `parsed_ship_storage.json` — per-ship interior PersonalStorage placement counts
+- `cache/rsi_flight_ready.json` — RSI ship-matrix snapshot (top-level, shared by Live + PTU; refetched at the start of every run)
+- `cache/<channel>/parsed_items.json` — all entity records
+- `cache/<channel>/parsed_vehicles.json` — vehicle records (includes `modification` for inline-mod resolution)
+- `cache/<channel>/parsed_ammo.json` — AmmoParams by GUID
+- `cache/<channel>/parsed_inventory.json` — InventoryContainer by GUID
+- `cache/<channel>/parsed_manufacturers.json` — manufacturer records
+- `cache/<channel>/parsed_guids.json` — GUID → className map
+- `cache/<channel>/parsed_gimbal_modifiers.json` — weapon gimbal modifier records
+- `cache/<channel>/parsed_ifcs_modifiers.json` — SIFCSModifiersLegacy records by GUID
+- `cache/<channel>/parsed_crafting.json` — Crafting blueprints + GPP records
+- `cache/<channel>/parsed_recoil.json` — procedural-recoil configs/modifiers + weapon recoil configs + misfire defs
+- `cache/<channel>/cosmetic_variants.json` — ship ClassNames flagged by the cosmetic classifier
+- `cache/<channel>/parsed_ship_storage.json` — per-ship interior PersonalStorage placement counts
 
-Delete `parsed_items.json` + `parsed_ammo.json` after changes to `dataforge_parser.py` to force re-parse. `--force` wipes the entire cache and re-unpacks.
+Delete `parsed_items.json` + `parsed_vehicles.json` after changes to `dataforge_parser.py` to force re-parse. `--force` wipes the entire channel cache and re-unpacks.
 
 ## Development notes
 

@@ -147,7 +147,51 @@ def _extract_vehicle_data(root):
     if physics:
         result["groundDynamics"] = physics
 
+    # Inline <Modifications> at the root carry per-variant overrides keyed
+    # by name (Zeus_CL, F7C_Mk2, ...). Each Modification has Elems whose
+    # idRef targets a Part by id — we record the (idRef, attr, value)
+    # triples so callers can apply them on the port tree per variant.
+    inline_mods = _extract_inline_modifications(root)
+    if inline_mods:
+        result["inlineModifications"] = inline_mods
+
     return result
+
+
+def _extract_inline_modifications(root):
+    """Return {variant_name: [{idRef, name, value}, ...]} for inline mods.
+
+    Modifications elements appear directly under the Vehicle root and group
+    one or more `<Modification name="...">` blocks, each containing
+    `<Elems><Elem idRef="..." name="..." value="..." /></Elems>` overrides.
+    """
+    mods_elem = root.find("Modifications")
+    if mods_elem is None:
+        return None
+    out = {}
+    for mod in mods_elem.findall("Modification"):
+        name = mod.get("name", "")
+        if not name:
+            continue
+        elems = []
+        # Both <Elems><Elem .../></Elems> and direct <Elem .../> are seen.
+        for child in list(mod):
+            if child.tag == "Elems":
+                for e in child.findall("Elem"):
+                    elems.append({
+                        "idRef": e.get("idRef", ""),
+                        "name": e.get("name", ""),
+                        "value": e.get("value", ""),
+                    })
+            elif child.tag == "Elem":
+                elems.append({
+                    "idRef": child.get("idRef", ""),
+                    "name": child.get("name", ""),
+                    "value": child.get("value", ""),
+                })
+        if elems:
+            out[name] = elems
+    return out or None
 
 
 def _collect_ground_vehicle_dynamics(root):
@@ -305,8 +349,16 @@ def _parse_item_port(part_elem):
         "minSize": safe_int(ip_elem.get("minSize") or ip_elem.get("minsize")),
         "maxSize": safe_int(ip_elem.get("maxSize") or ip_elem.get("maxsize")),
     }
+    # `id` is the modification target identifier — inline <Modifications>
+    # blocks reference these ids via `<Elem idRef="..." />` to override
+    # specific port attributes per variant (Zeus_CL enables modCompCLTurret,
+    # F7C_Mk2 enables modPartPowerPlant02, etc.).
+    part_id = part_elem.get("id")
+    if part_id:
+        port["id"] = part_id
     # skipPart marks variant-only / disabled ports (Zeus EMP/QED, etc.) —
-    # reference omits these entirely.
+    # reference omits these entirely. Inline modifications can re-enable
+    # via `<Elem idRef="<id>" name="skipPart" value="0" />`.
     if part_elem.get("skipPart") == "1":
         port["skipPart"] = True
 
@@ -452,16 +504,25 @@ def _parse_item_port(part_elem):
     return port
 
 
-def get_vehicle_impl_data(vehicle_impls, vehicle_definition, class_name):
+def get_vehicle_impl_data(vehicle_impls, vehicle_definition, class_name,
+                          modification=None):
     """Look up vehicle implementation data by vehicleDefinition path or className.
 
     Lookup is case-insensitive because vehicleDefinition paths from the game
     data are lowercase while impl filenames use proper casing (AEGS_Gladius).
 
+    When `modification` matches a name in the impl's `inlineModifications`
+    map, the resolved data is a copy with that modification's elem
+    overrides applied to the port tree (skipPart toggles, port renames,
+    size changes, etc.). Used by Zeus variants (Zeus_CL/MR/ST inline
+    modifications in RSI_Zeus.xml) and F7C_Mk2 (inline mod in
+    ANVL_Hornet_F7A.xml).
+
     Args:
         vehicle_impls: dict from parse_vehicle_implementations
         vehicle_definition: path like "scripts/.../xml/aegs_gladius.xml" (lowercase)
         class_name: fallback className like "AEGS_Gladius"
+        modification: variant name from VehicleComponentParams.modification
 
     Returns:
         parsed vehicle impl data dict, or None
@@ -482,22 +543,75 @@ def get_vehicle_impl_data(vehicle_impls, vehicle_definition, class_name):
     # the Sentinel variant. The vehicle's vehicleDefinition still points to
     # the base file, so we have to prefer className for the lookup.
     data = _get(class_name)
-    if data:
-        return data
-
-    # Try by vehicleDefinition filename
-    if vehicle_definition:
+    if data is None and vehicle_definition:
         basename = os.path.splitext(os.path.basename(vehicle_definition))[0]
         data = _get(basename)
-        if data:
-            return data
+    if data is None:
+        # Try matching by removing common suffixes
+        base = class_name.split("_")
+        for i in range(len(base), 1, -1):
+            candidate = "_".join(base[:i])
+            d = _get(candidate)
+            if d:
+                data = d
+                break
+    if data is None:
+        return None
 
-    # Try matching by removing common suffixes
-    base = class_name.split("_")
-    for i in range(len(base), 1, -1):
-        candidate = "_".join(base[:i])
-        data = _get(candidate)
-        if data:
-            return data
+    # Apply inline modification overrides (Zeus_CL, F7C_Mk2, ...).
+    if modification and data.get("inlineModifications"):
+        elems = data["inlineModifications"].get(modification)
+        if elems:
+            data = _apply_inline_modification(data, elems)
+    return data
 
-    return None
+
+def _apply_inline_modification(impl_data, elems):
+    """Return a copy of impl_data with `elems` applied to the port tree.
+
+    Each elem has {idRef, name, value}. Walks the port tree, finds every
+    port whose `id` matches `idRef`, and overrides the named attribute.
+    Special-cases skipPart so "0" clears the flag and "1" sets it.
+
+    The same id can appear at multiple positions in the parsed port tree
+    (the recursive parser duplicates Parts nodes that sit inside
+    non-ItemPort containers); we apply to every match so the override
+    sticks regardless of which instance the consumer encounters.
+    """
+    import copy
+    new_data = copy.deepcopy(impl_data)
+
+    ports_by_id = {}
+
+    def _index(ports):
+        for p in ports:
+            if not isinstance(p, dict):
+                continue
+            pid = p.get("id")
+            if pid:
+                ports_by_id.setdefault(pid, []).append(p)
+            _index(p.get("subPorts") or [])
+
+    _index(new_data.get("ports") or [])
+
+    for elem in elems:
+        idref = elem.get("idRef") or ""
+        attr = elem.get("name") or ""
+        value = elem.get("value") or ""
+        targets = ports_by_id.get(idref) or []
+        for port in targets:
+            if attr == "skipPart":
+                if value == "0":
+                    port.pop("skipPart", None)
+                elif value == "1":
+                    port["skipPart"] = True
+            elif attr in ("minSize", "maxSize", "minsize", "maxsize"):
+                # Normalise both attr-name spellings to canonical camelCase.
+                key = "minSize" if attr.lower() == "minsize" else "maxSize"
+                port[key] = safe_int(value)
+            else:
+                # Generic pass-through for `name`, `flags`, etc. The port dict
+                # uses the same key names as the impl XML attributes.
+                port[attr] = value
+
+    return new_data

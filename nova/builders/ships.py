@@ -300,9 +300,15 @@ def _build_ship(class_name, record, ctx):
             "ExpeditedCost": insurance.get("baseExpeditingFee", 0),
         }
 
-    # Vehicle implementation data (mass, port definitions)
+    # Vehicle implementation data (mass, port definitions). The optional
+    # `modification` field selects an inline <Modification> block from the
+    # impl XML — Zeus_CL/MR/ST in RSI_Zeus.xml, F7C_Mk2 in
+    # ANVL_Hornet_F7A.xml, etc. — whose elems override skipPart toggles
+    # and port renames per variant.
     veh_def = vehicle.get("vehicleDefinition", "")
-    impl = get_vehicle_impl_data(ctx.vehicle_impls, veh_def, class_name)
+    modification = vehicle.get("modification") or None
+    impl = get_vehicle_impl_data(ctx.vehicle_impls, veh_def, class_name,
+                                  modification=modification)
 
     # Compute storage from seat access inventory containers, plus interior
     # PersonalStorage placements walked from .socpak archives.
@@ -2223,6 +2229,12 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None,
             return "SalvageHardpoints"
         if "mining" in pn:
             return "MiningHardpoints"
+        # Utility tractor-beam arms (Zeus CL `hardpoint_tractor_beam` —
+        # ToolArm port enabled by the Zeus_CL inline modification, fired
+        # from the co-pilot seat). No mining/salvage inner port; the only
+        # discriminator left is the port name.
+        if "tractor" in pn:
+            return "UtilityHardpoints"
 
     # Module attach slots — swappable module bays on ships like the Cyclone
     # carry both TurretBase.MannedTurret and Container.CargoGrid; the port
@@ -3968,6 +3980,13 @@ def _add_impl_only_ports(tree, impl_ports, loadout_port_names):
     def _emit(port, is_top_level=False):
         pname = port.get("name", "")
         if not pname or pname in loadout_port_names:
+            return
+        # `skipPart="1"` marks variant-conditional ports that are disabled
+        # in the base impl. Modifications can re-enable them by overriding
+        # the elem to "0", but if it's still set when we see the port,
+        # reference omits it entirely (Zeus CL bounty/passenger turrets,
+        # Zeus EMP/QED, etc.).
+        if port.get("skipPart"):
             return
         # Dedupe: impl XML can declare the same port name at multiple
         # hierarchy levels (e.g. Cutlass hardpoint_weapon_rack appears
