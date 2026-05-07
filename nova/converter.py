@@ -112,9 +112,16 @@ def _assemble_game2_xml(records_root, output_path):
     <EntityClassDefinition.Foo .../>). We strip any XML declaration line
     from individual files and emit each root element verbatim inside the
     envelope so the existing stream parser recognises every record.
+
+    Per-record files are validated with `ET.fromstring` first; malformed
+    ones (e.g. unforge v4.0.83's TagDatabase output, which emits more
+    closing tags than opening) are skipped with a warning so the parse
+    of the assembled Game2.xml doesn't fail downstream.
     """
+    import xml.etree.ElementTree as ET
     file_count = 0
     skipped_count = 0
+    malformed = []
     with open(output_path, "w", encoding="utf-8", newline="\n") as out:
         out.write("<DataForge>\n")
         for root, _, files in os.walk(records_root):
@@ -137,12 +144,26 @@ def _assemble_game2_xml(records_root, output_path):
                 if not content:
                     skipped_count += 1
                     continue
+                # Reject files that aren't well-formed standalone XML —
+                # otherwise their broken tag balance corrupts the
+                # assembled Game2.xml at random offsets.
+                try:
+                    ET.fromstring(content)
+                except ET.ParseError:
+                    malformed.append(fpath)
+                    continue
                 out.write(content)
                 out.write("\n")
                 file_count += 1
         out.write("</DataForge>\n")
     if skipped_count:
         print(f"  [WARN] Skipped {skipped_count} unreadable/empty per-record file(s)")
+    if malformed:
+        print(f"  [WARN] Skipped {len(malformed)} malformed per-record file(s):")
+        for p in malformed[:5]:
+            print(f"    {p}")
+        if len(malformed) > 5:
+            print(f"    ... +{len(malformed) - 5} more")
     return file_count
 
 
