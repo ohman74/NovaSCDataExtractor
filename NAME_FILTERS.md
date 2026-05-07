@@ -31,18 +31,6 @@ structural replacement is plausible but hasn't been attempted yet.
 
 ## HIGH — open
 
-### Noise vs Decoy countermeasure
-File: `nova/builders/ships.py:4451`
-```python
-if "noise" in entity_class.lower() or "chaff" in entity_class.lower():
-    entry["Type"] = "Noise"
-elif "flare" in entity_class.lower() or "decoy" in entity_class.lower():
-    entry["Type"] = "Decoy"
-```
-Countermeasure ammo likely carries a structural type (e.g.
-`SCItemCountermeasureAmmoParams.countermeasureType`). Confirm in the
-source XML and use it.
-
 ### Pool-size lookups
 Files: `nova/builders/stditem.py:1395-1397`, `:3568`, `:3786`
 ```python
