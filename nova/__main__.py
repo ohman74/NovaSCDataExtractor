@@ -352,12 +352,23 @@ def run_extraction(config, args):
 
     # Get game version
     version_info = config.get_version_info()
-    game_version = version_info["branch"]
+    branch = version_info["branch"]
     version_label = version_info["version"] or "unknown"
-    print(f"\nGame branch:   {game_version}")
+    p4_change = version_info["p4_change"]
+    # Public patch version (e.g. "4.7.2") looked up from the RSI launcher
+    # log via the current build's p4 changelist. The build manifest's
+    # `Branch` is the major patch series ("sc-alpha-4.7.0") and stays
+    # constant across every 4.7.x patch, so it can't be the gameVersion.
+    launcher_patch = config.get_launcher_patch()
+    if launcher_patch and p4_change:
+        game_version = f"{launcher_patch}.{p4_change}"
+    else:
+        game_version = branch
+    print(f"\nGame version:  {game_version}")
+    print(f"Build branch:  {branch}")
     print(f"Build version: {version_label}")
-    if version_info["p4_change"]:
-        print(f"P4 changelist: {version_info['p4_change']}")
+    if p4_change:
+        print(f"P4 changelist: {p4_change}")
     print(f"Data.p4k: {config.p4k_path}")
     p4k_size = os.path.getsize(config.p4k_path) / (1024 * 1024 * 1024)
     print(f"Data.p4k size: {p4k_size:.1f} GB")
@@ -571,6 +582,7 @@ def run_extraction(config, args):
     # Write metadata
     metadata = {
         "gameVersion": game_version,
+        "buildBranch": branch,
         "buildVersion": version_info["version"],
         "p4Change": version_info["p4_change"],
         "buildDate": version_info["build_date"],

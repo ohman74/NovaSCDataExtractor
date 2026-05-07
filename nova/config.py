@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import sys
 
 
@@ -75,6 +76,48 @@ class Config:
         except (json.JSONDecodeError, OSError):
             pass
         return info
+
+    def get_launcher_patch(self):
+        """Look up the public patch version (e.g. "4.7.2") for this channel
+        from the RSI launcher log.
+
+        The build_manifest's `Branch` field stays at the major patch series
+        (e.g. "sc-alpha-4.7.0") across every 4.7.x patch, so it can't tell
+        us whether we're on 4.7.0, 4.7.1, or 4.7.2. The launcher logs every
+        install/update with the marketing patch version
+        (`4.7.2-live.11715810`); we cross-reference the current build's
+        p4 changelist to find the matching entry.
+
+        Returns the patch string ("4.7.2") or None if the launcher log
+        isn't available, the channel doesn't match, or the changelist
+        isn't in the log.
+        """
+        appdata = os.environ.get("APPDATA")
+        if not appdata:
+            return None
+        log_path = os.path.join(appdata, "rsilauncher", "logs", "log.log")
+        if not os.path.isfile(log_path):
+            return None
+        info = self.get_version_info()
+        p4 = info.get("p4_change")
+        if not p4:
+            return None
+        pattern = re.compile(
+            r"\bSC\s+" + re.escape(self.channel.upper())
+            + r"\s+(\d+\.\d+\.\d+)-"
+            + re.escape(self.channel.lower())
+            + r"\." + re.escape(p4) + r"\b"
+        )
+        last_match = None
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    m = pattern.search(line)
+                    if m:
+                        last_match = m.group(1)
+        except OSError:
+            return None
+        return last_match
 
     def is_cache_stale(self):
         """Check whether the cached Game2.xml is older than the live Data.p4k.
