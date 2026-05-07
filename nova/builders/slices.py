@@ -21,7 +21,8 @@ from .vehicles import build_vehicles
 # consumers can hide/group cosmetic-only paint variants without re-running
 # the classifier.
 _METADATA_FIELDS = ["ClassName", "Name", "Manufacturer", "Career", "Role", "Size", "Cargo", "Type",
-                    "CosmeticVariant", "CosmeticVariantOf"]
+                    "CosmeticVariant", "CosmeticVariantOf",
+                    "FlightReady", "Thumbnail"]
 _STATS_FIELDS = [
     "ClassName", "Name", "Description", "Career", "Role", "Size", "Cargo",
     "Crew", "WeaponCrew", "OperationsCrew",
@@ -33,9 +34,11 @@ _STATS_FIELDS = [
     "SteerCharacteristics", "DriveCharacteristics",
     "TrackSteerCharacteristics", "TrackWheeledCharacteristics",
     "CosmeticVariant", "CosmeticVariantOf",
+    "FlightReady",
 ]
 _HARDPOINTS_FIELDS = ["ClassName", "Name", "IsSpaceship", "IsVehicle", "IsGravlev", "PortTags", "Hull", "Hardpoints",
-                       "CosmeticVariant", "CosmeticVariantOf"]
+                       "CosmeticVariant", "CosmeticVariantOf",
+                       "FlightReady"]
 
 
 def _empty_commlink():
@@ -92,6 +95,17 @@ def to_metadata(record):
     out["ProgressTracker"] = _empty_progress_tracker()
     out["Store"] = _empty_store()
     out["PU"] = _empty_pu()
+    # Thumbnail from the matched matrix entry's first media item.
+    # store_thumb_listing_small is the store-listing thumbnail — the right
+    # size for a ship-card UI. Larger / smaller variants are available in
+    # the same `images` dict if needed.
+    entry = record.get("_matrix_entry") or {}
+    media = entry.get("media") or []
+    if media:
+        images = (media[0] or {}).get("images") or {}
+        thumb = images.get("store_thumb_listing_small")
+        if thumb:
+            out["Thumbnail"] = thumb
     return out
 
 
@@ -142,6 +156,23 @@ def _merge_ships_and_vehicles(ctx):
             merged[cn] = dict(r)
 
     result = sorted(merged.values(), key=lambda r: r.get("Name", "") or r.get("ClassName", ""))
+
+    # Tag matrix-matched ships with FlightReady. The matched matrix entry
+    # is also stashed on each record (underscore-prefixed → not projected
+    # into output) for downstream enrichment passes (Store / Career / etc.).
+    # `match_ships` returns an empty dict when no matrix is available,
+    # except for the hardcoded in-game earnable allow-list which is always
+    # tagged.
+    from ..matrix import match_ships
+    matrix_data = getattr(ctx, "matrix", None)
+    matches = match_ships(matrix_data, result)
+    for r in result:
+        entry = matches.get(r["ClassName"])
+        if entry is None:
+            continue
+        r["_matrix_entry"] = entry
+        r["FlightReady"] = entry.get("production_status") == "flight-ready"
+
     ctx._merged_vehicles = result
     return result
 

@@ -289,6 +289,13 @@ def main():
     # Run primary channel (Live by default, or whatever --channel says).
     primary_config = Config(config_path, channel_override=args.channel)
     primary_config._config_path = config_path
+
+    # Fetch the RSI ship-matrix once per run. The matrix is channel-agnostic,
+    # so Live and PTU both read the same cache file populated here.
+    primary_config.ensure_dirs()
+    from .matrix import fetch_matrix
+    fetch_matrix(primary_config.cache_root)
+
     run_extraction(primary_config, args)
     if not args.no_package:
         print(f"\n[PACKAGE] Zipping {primary_config.channel} output...")
@@ -518,6 +525,18 @@ def run_extraction(config, args):
     with open(ssi_path, "w", encoding="utf-8") as f:
         json.dump(ship_storage_index, f, indent=2, sort_keys=True)
 
+    # Load the RSI ship-matrix cached at the top of main(). The slices
+    # builder uses this to tag emitted ships with `FlightReady` and to
+    # populate Store / Career / Role / Cargo placeholders. None when
+    # neither network nor cached file is available; tagging is then
+    # silently omitted.
+    from .matrix import load_matrix
+    matrix_data = load_matrix(config.cache_root)
+    if matrix_data:
+        print(f"\n[MATRIX] Loaded {len(matrix_data)} ship-matrix entries.")
+    else:
+        print(f"\n[MATRIX] No matrix data — FlightReady tags will be omitted.")
+
     # Build context shared by all builders
     ctx = BuildContext(items_by_class, vehicles_by_class, guid_to_class,
                        manufacturers, ammo_params, translations, vehicle_impls,
@@ -531,6 +550,7 @@ def run_extraction(config, args):
                        recoil_modifiers=recoil_modifiers,
                        weapon_recoil_configs=weapon_recoil_configs,
                        misfire_defs=misfire_defs)
+    ctx.matrix = matrix_data
 
     # Build output
     categories = args.only if args.only else list(BUILDERS.keys())

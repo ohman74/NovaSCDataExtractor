@@ -35,19 +35,6 @@ _AI_MISSION_PATTERNS = [
     "_Advocacy", "_Indestructible",
 ]
 
-# Explicit per-ClassName exclusions that don't fit a shared infix pattern
-# AND are flagged `ReadyToInclude` by CIG (so `_is_not_included` doesn't
-# catch them). Each entry has a one-line justification; revisit when CIG's
-# inventory changes. Verified against the RSI ship-matrix
-# (`py compare_matrix.py`).
-_NOT_PLAYER_OWNABLE = frozenset({
-    # Ships that aren't cosmetic twins of any sibling but still shouldn't
-    # ship as player-flyable. Cosmetic/paint variants are identified
-    # algorithmically by `_is_cosmetic_variant` — do NOT add those here.
-    "ANVL_Lightning_F8",            # F8A military-spec; has no sibling base on the same impl (player owns F8C only).
-    "ORIG_600i_Executive_Edition",  # Classifier says FUNCTIONAL (different landingSystem, inventoryContainer, Exec turret); retired SKU per product decision.
-})
-
 
 def _is_ground_vehicle(vehicle):
     """Return True if the vehicle record represents a ground vehicle."""
@@ -187,8 +174,6 @@ def _is_ai_or_excluded_variant(class_name):
     vehicleDefinition). This function handles the rest.
     """
     cn = class_name
-    if cn in _NOT_PLAYER_OWNABLE:
-        return True
     for pat in _AI_MISSION_PATTERNS:
         if pat in cn:
             return True
