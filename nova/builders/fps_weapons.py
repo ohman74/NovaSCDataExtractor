@@ -64,7 +64,13 @@ def _is_non_player_fps(class_name, record):
         return True
     if cn.startswith("vlk_"):
         return True
-    if "salvage_repair" in cn:
+    # Multitool sub-attachments (`grin_multitool_01_salvage_repair`) are
+    # WeaponAttachment.Utility and routed to fps_attachments.py. The
+    # standalone Cambio SRT salvage tool (`grin_salvage_repair_01`) is
+    # WeaponPersonal.Gadget and belongs here. Discriminate by type so the
+    # standalone gadget isn't dropped along with sub-attachments.
+    attach_def = record.get("attachDef") or {}
+    if "salvage_repair" in cn and attach_def.get("type") == "WeaponAttachment":
         return True
     if cn == "yormandi_weapon":
         return True

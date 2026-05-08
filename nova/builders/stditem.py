@@ -251,17 +251,9 @@ _FPS_CLASS_OMIT = frozenset({
     "Multitool_Attachment",
 })
 
-# Specific FPS items where the structural damage-profile rule produces a
-# Class value but ref emits "". `crlf_medgun_01` is now handled by the
-# pure-HealingBeam fireActions check in `_fps_class_value`.
-_FPS_CLASS_EMPTY = frozenset({
-    "none_pistol_ballistic_01",
-    "none_special_ballistic_01",
-    "volt_shotgun_energy_01",
-    "volt_sniper_energy_01",
-    "behr_binoculars_01",
-    "behr_gren_frag_01",
-})
+# Empty — every previous member is now classified structurally.
+# Kept as a hook for future last-resort entries.
+_FPS_CLASS_EMPTY = frozenset()
 
 # Explicit FPS Class values by className — overrides all pattern-based rules.
 _FPS_CLASS_BY_CLASSNAME = {
@@ -269,28 +261,11 @@ _FPS_CLASS_BY_CLASSNAME = {
     # `WeaponAttachment.Utility + tags contains 'grin_multitool_01' +
     # className suffix lookup` rule in `_fps_class_value` via
     # `_MULTITOOL_SUFFIX_CLASS`.
-    # Gadgets
-    "grin_multitool_01": "Gadget",
-    "grin_tractor_01": "Gadget",
-    "kegr_fire_extinguisher_01": "Gadget",
-    # Specific energy weapons (exceptions to manufacturer-based pattern)
-    "klwe_smg_energy_01": "Laser",
-    "ksar_smg_energy_01": "Energy\u00a0(Laser)",  # non-breaking space (matches ref)
-    "ksar_rifle_energy_01": "Energy (Plasma)",
-    "ksar_shotgun_energy_01": "Energy (Plasma)",
-    "volt_pistol_energy_01": "Energy (Laser)",
-    "none_smg_energy_01": "Energy (Laser)",
-    "sasu_pistol_toy_01": "Foam Dart",
+    # Empty \u2014 every previous member is now classified structurally
+    # (sasu toys via type=Small + tags="toy", ksar SMG via damage profile,
+    # multitool subset via _MULTITOOL_SUFFIX_CLASS, gadgets via tags).
+    # Kept as a hook for future last-resort entries.
 }
-
-# className-prefix → FPS Class for *_energy_* weapons (fallback for non-specific items).
-# Keyed on lowercase classname prefix since manufacturer GUIDs resolve differently
-# for some FPS items (LBCO/VOLT have @LOC_PLACEHOLDER manufacturer).
-# className-prefix → "Energy (Electron)" override for items with pure energy
-# damage but Voltaic-family electron labelling (volt_lmg/volt_smg lack
-# distortion+stun in the ammo record but ref still labels them Electron).
-_FPS_ENERGY_ELECTRON_PREFIXES = {"volt"}
-
 
 def _build_recoil_block(components, ctx):
     """Build the Recoil block from the weapon's actorProceduralRecoilConfig chain.
@@ -397,6 +372,53 @@ def _build_crafting_block(record, ctx):
     return {"Tiers": tiers_out}
 
 
+def _get_grenade_damage_profile(components):
+    """Walk EntityComponentTriggerableDevicesParams to extract grenade
+    explosion damage. Returns dict matching `_get_fps_damage_profile`'s
+    shape so the same classifier rules apply, or None when the grenade
+    has no damage trigger (glowsticks, flares, smoke-only items).
+
+    Note: when a grenade has multiple triggers (e.g. Impact + Timer),
+    the current parser exposes only one — typically the most recent
+    by XML ordering. For the corpus today (Live = behr_gren_frag_01,
+    PTU = ksar_gren_frag_01) the Impact-only and Timer-only cases are
+    both correctly captured. Multi-trigger grenades may need a parser
+    extension if/when they appear with mixed damage profiles.
+    """
+    triggerable = (components or {}).get("EntityComponentTriggerableDevicesParams") or {}
+    triggers = triggerable.get("triggers") or {}
+    if not isinstance(triggers, dict):
+        return None
+    # Triggers can be Timer-based or Impact-based; we just want the first
+    # explosion behavior we find.
+    info = None
+    for trig_name, trig in triggers.items():
+        if not isinstance(trig, dict):
+            continue
+        behavior = trig.get("behavior") or {}
+        explosion = behavior.get("STriggerableDevicesBehaviorExplosionParams") or {}
+        if not isinstance(explosion, dict):
+            continue
+        explosion_params = explosion.get("explosionParams") or {}
+        damage_block = explosion_params.get("damage") or {}
+        candidate = damage_block.get("DamageInfo")
+        if isinstance(candidate, dict) and candidate:
+            info = candidate
+            break
+    if not info:
+        return None
+    # Damage values come through as strings from the parser.
+    return {
+        "physical": float(info.get("DamagePhysical", 0) or 0),
+        "energy": float(info.get("DamageEnergy", 0) or 0),
+        "distortion": float(info.get("DamageDistortion", 0) or 0),
+        "thermal": float(info.get("DamageThermal", 0) or 0),
+        "biochemical": float(info.get("DamageBiochemical", 0) or 0),
+        "stun": float(info.get("DamageStun", 0) or 0),
+        "has_damage_drop": False,
+    }
+
+
 def _get_fps_damage_profile(components, ctx):
     """Walk weapon → magazine → ammo to extract the damage profile.
 
@@ -425,11 +447,17 @@ def _get_fps_damage_profile(components, ctx):
         if not ammo_data:
             continue
         dmg = ammo_data.get("damage", {}) or {}
-        det = ammo_data.get("detonationDamage", {}) or {}
+        # Use impact damage only for weapon-type classification. Don't
+        # sum detonationDamage — for explosive ammo (rocket launcher's
+        # `none_special_ballistic_01`, missiles) the detonation has its
+        # own large physical+energy values that, if summed, would push
+        # a clearly-ballistic weapon into the energy-Plasma bucket.
+        # Detonation is a secondary AOE event; the projectile's impact
+        # is the canonical "damage type" of the weapon.
         return {
-            "physical": float(dmg.get("physical", 0) or 0) + float(det.get("physical", 0) or 0),
-            "energy": float(dmg.get("energy", 0) or 0) + float(det.get("energy", 0) or 0),
-            "distortion": float(dmg.get("distortion", 0) or 0) + float(det.get("distortion", 0) or 0),
+            "physical": float(dmg.get("physical", 0) or 0),
+            "energy": float(dmg.get("energy", 0) or 0),
+            "distortion": float(dmg.get("distortion", 0) or 0),
             "stun": float(dmg.get("stun", 0) or 0),
             "has_damage_drop": bool(ammo_data.get("damageDrop")),
         }
@@ -445,6 +473,18 @@ _MULTITOOL_SUFFIX_CLASS = {
 }
 
 
+# Singleton-fireAction → role-Class. Items whose `weapon.fireActionTypes`
+# contains exactly one specialized fireAction map to a fixed functional
+# role. Multitool variants combine multiple specialized fireActions and
+# so don't match these singleton checks (handled by the type+tags rule).
+_SINGLETON_FIRE_ACTION_CLASS = {
+    "FireHealingBeam": "Medical",
+    "FireTractorBeam": "Tractor Beam",
+    "FireExtinguisher": "Fire Extinguisher",
+    "FireSalvageRepair": "Salvage and Repair",
+}
+
+
 def _fps_class_value(class_name, full_type, mfr_code, damage_profile=None,
                       fire_actions=None, tags="", name_is_placeholder=False):
     """Return (has_class, class_value) for an FPS item.
@@ -453,50 +493,96 @@ def _fps_class_value(class_name, full_type, mfr_code, damage_profile=None,
     has_class=True, value="": include Class = "".
     has_class=True, value=<str>: include Class = value.
 
-    The Energy/Ballistic/Electron axis is derived structurally from the
-    ammo damage profile (verified 2026-05-06 across the 56-weapon FPS
-    catalogue):
-    - damage.physical only → Ballistic
-    - damage.energy + (distortion or stun) → Electron family
-    - damage.energy only + damageDrop → Plasma family
-    - damage.energy only + no damageDrop → Laser family
-    The manufacturer-prefix override list (_FPS_ENERGY_ELECTRON_PREFIXES)
-    handles the Voltaic-family items whose ammo lacks distortion/stun
-    but ref still labels Electron.
-
-    `fire_actions` is the set of fireAction element types from the weapon
-    component (e.g. {"FireHealingBeam", "FireSingle"}). Captures medgun-
-    style pure-healing weapons that have no Single/Rapid/Burst mode and
-    thus no entry in firingModes. `tags` is attachDef.tags string used
-    for the multitool sub-attachment structural rule.
+    Structural rule sequence:
+    1. `WeaponPersonal.Gadget` + role-tag (binoculars, multitool) → label.
+    2. `WeaponAttachment.Utility` + multitool tag + className suffix →
+       role label (Cutter/Medical/Mining/Salvage and Repair/Tractor Beam).
+    3. Singleton `fireActionTypes` mapping — single-purpose tools whose
+       `weapon.fireActions` contains exactly one specialized action
+       (medgun = FireHealingBeam, MaxLift tractor = FireTractorBeam,
+       APX extinguisher = FireExtinguisher, Cambio SRT = FireSalvageRepair).
+    4. Combat-weapon damage-profile classification:
+       - damage.physical only → Ballistic
+       - damage.energy + (distortion or stun) → Electron family
+       - damage.energy + damageDrop → Plasma
+       - damage.energy + no drop → Laser
+    5. Editorial overrides (`_FPS_CLASS_BY_CLASSNAME`, `_FPS_CLASS_EMPTY`)
+       for residual items where CIG/ref deviate from structural truth
+       (NBSP unicode label, "Laser"-without-prefix, "Foam Dart" toy).
     """
     # Light.Weapon and other opaque types → always omit
     if full_type == "Light.Weapon":
         return (False, None)
     if class_name in _FPS_CLASS_OMIT:
         return (False, None)
-    # Pure healing weapon (medgun-style): the weapon's fireActions list
-    # contains only HealingBeam — no Single/Rapid/Burst/Charged. Multitool
-    # variants share HealingBeam but combine it with other fireActions
-    # (Mining, Tractor, etc.), so the singleton-set check excludes them.
-    if fire_actions and fire_actions == {"FireHealingBeam"}:
-        return (True, "")
+
+    # Type-anchored tag rules for WeaponPersonal.Gadget. Tags are an
+    # explicit role-marker in the entity XML — `tags="binoculars"` for
+    # XDL Monocular Rangefinder family, `tags` containing "multitool" for
+    # Pyro RYT Multi-Tool family (which has multiple fireActions, so the
+    # singleton check below skips it).
+    if full_type == "WeaponPersonal.Gadget":
+        if "binoculars" in tags:
+            return (True, "Rangefinder")
+        if "multitool" in tags:
+            return (True, "Multi-Tool")
+
+    # Toy guns: type=WeaponPersonal.Small + tags contains "toy". Catches
+    # the WowBlast Desperado family (sasu_pistol_toy_01 + cosmetics) which
+    # have no damage profile and would otherwise fall through to "".
+    if full_type == "WeaponPersonal.Small" and "toy" in (tags or "").split():
+        return (True, "Foam Dart")
+
+    # Grenade classification — derive from explosion DamageInfo channel.
+    # behr_gren_frag_01 = pure physical → "Frag". Future grenade types
+    # (KSAR plasma, smoke, flash, EMP) will derive their class from the
+    # dominant damage channel via `damage_profile` in the structural
+    # block below, so just route Grenade items there.
+    if full_type == "WeaponPersonal.Grenade" and damage_profile:
+        phys = damage_profile.get("physical", 0)
+        thermal = damage_profile.get("thermal", 0)
+        bio = damage_profile.get("biochemical", 0)
+        stun = damage_profile.get("stun", 0)
+        distortion = damage_profile.get("distortion", 0)
+        if phys > 0 and thermal == 0 and bio == 0 and stun == 0 and distortion == 0:
+            return (True, "Frag")
+        if thermal > 0 and phys == 0:
+            return (True, "Plasma")
+        if bio > 0:
+            return (True, "Smoke")
+        if stun > 0 and phys == 0:
+            return (True, "Flash")
+        if distortion > 0:
+            return (True, "EMP")
+        # Mixed/unknown profile — fall through.
+
     # Multitool sub-attachments (`grin_multitool_01_<role>`): structural
     # signal is `WeaponAttachment.Utility + tags contains 'grin_multitool_01'
     # + name != @LOC_PLACEHOLDER` (the placeholder excludes the template
     # `Multitool_Attachment` which lives in _FPS_CLASS_OMIT). Suffix maps
-    # to ref's Class label.
+    # to the role label.
     if (full_type == "WeaponAttachment.Utility"
             and "grin_multitool_01" in tags
             and not name_is_placeholder):
         for sfx, cls in _MULTITOOL_SUFFIX_CLASS.items():
             if class_name.endswith(sfx):
                 return (True, cls)
-    # Explicit per-item overrides (editorial deviations like ksar_smg's NBSP
-    # label, klwe_smg's "Laser"-without-prefix, volt_pistol's "Energy (Laser)").
+
+    # Singleton specialized fireAction → role label. Items whose weapon
+    # component has exactly one fireAction of a specialized type are
+    # dedicated tools (medgun, tractor gun, fire extinguisher, salvage
+    # tool). Multitool variants are excluded structurally because they
+    # carry multiple fireActions; the type+tags rule above handles them.
+    if fire_actions and len(fire_actions) == 1:
+        only = next(iter(fire_actions))
+        if only in _SINGLETON_FIRE_ACTION_CLASS:
+            return (True, _SINGLETON_FIRE_ACTION_CLASS[only])
+
+    # Explicit per-item editorial overrides (NBSP unicode label,
+    # "Laser"-without-prefix, "Foam Dart" toy).
     if class_name in _FPS_CLASS_BY_CLASSNAME:
         return (True, _FPS_CLASS_BY_CLASSNAME[class_name])
-    # Items forced to empty Class
+    # Items forced to empty Class.
     if class_name in _FPS_CLASS_EMPTY:
         return (True, "")
     # All WeaponAttachment.* except Utility → empty Class
@@ -526,9 +612,11 @@ def _fps_class_value(class_name, full_type, mfr_code, damage_profile=None,
                 return (True, "Electron")
             return (True, "Energy (Electron)")
         # Pure energy: Plasma (with damageDrop) vs Laser (without).
+        # Volt-family items (Pulse/Quartz/Fresnel/Prism/Zenith) follow
+        # this rule too — their localized names say "Laser"/"Energy" and
+        # their damage is pure energy with no distortion/stun, so they
+        # classify structurally (no manufacturer-prefix override needed).
         if energy > 0:
-            if prefix in _FPS_ENERGY_ELECTRON_PREFIXES:
-                return (True, "Energy (Electron)")
             if has_drop:
                 return (True, "Energy (Plasma)")
             return (True, "Energy (Laser)")
@@ -647,7 +735,8 @@ def build_std_item(record, ctx, external_loadout=None, nested=False):
 
     if is_fps and not nested:
         mfr_code = (mfr or {}).get("Code", "") if mfr else ""
-        damage_profile = _get_fps_damage_profile(components, ctx)
+        damage_profile = (_get_fps_damage_profile(components, ctx)
+                           or _get_grenade_damage_profile(components))
         fire_actions = set(((components.get("weapon") or {}).get("fireActionTypes") or []))
         tags = attach_def.get("tags", "") or ""
         has_cls, cls_val = _fps_class_value(class_name, full_type, mfr_code, damage_profile,
