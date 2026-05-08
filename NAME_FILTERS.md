@@ -37,20 +37,7 @@ structural replacement is plausible but hasn't been attempted yet.
 
 ## MEDIUM — open
 
-### FPS energy/ballistic class split
-File: `nova/builders/stditem.py:274, 285` (`_FPS_CLASS_EMPTY`,
-`_FPS_CLASS_BY_CLASSNAME`)
-
-Classification of FPS weapons as Energy / Ballistic / Laser / etc. is
-currently ClassName-based. CIG encodes this as an editorial label; the
-weapon component's `fireType` (rapid / sequence / charged / burst) cuts
-across both classes, and the ammo record damage-type isn't populated for
-personal weapons in the current parse. Candidate: extend the ammo parse
-to capture damage-type on personal weapons and replace the
-className-keyed dicts.
-
-Melee classification is already structural
-(`full_type == "WeaponPersonal.Knife"`).
+(empty — all resolved)
 
 ---
 
