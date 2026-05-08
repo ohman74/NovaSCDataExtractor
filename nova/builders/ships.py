@@ -12,7 +12,7 @@ _GROUND_MOVEMENT_CLASSES = {"arcadewheeled", "wheeled", "tracked"}
 # record shape as a player ship. See `_is_ai_or_excluded_variant` below for why
 # this is name-based rather than structural.
 _AI_MISSION_PATTERNS = [
-    "_PU_AI_", "_EA_AI_", "_Unmanned_", "_Template",
+    "_PU_AI_", "_EA_AI_", "_Unmanned_", "_Template", "_TEMP",
     "_S42_", "_AI_", "_NPC_", "_Dummy",
     "_Derelict_", "_Wreck", "_NoDebris",
     "_Hijacked", "_Boarded", "_Crewless",
@@ -1391,9 +1391,9 @@ def _build_ship_resource_network(class_name, ctx):
     behaviour: the Cyclone ground vehicles have explicit pool=0 records,
     so absence vs zero is meaningful.
     """
-    cn_lower = class_name.lower()
-    if cn_lower in ctx.weapon_pool_sizes:
-        return {"ItemPools": {"WeaponPoolSize": float(ctx.weapon_pool_sizes[cn_lower])}}
+    guid = (ctx.vehicles.get(class_name) or {}).get("guid")
+    if guid and guid in ctx.weapon_pool_sizes:
+        return {"ItemPools": {"WeaponPoolSize": float(ctx.weapon_pool_sizes[guid])}}
     return None
 
 
@@ -3639,7 +3639,8 @@ def _enrich_controllers(tree, loadout_entries, ctx, class_name):
     # Weapons: from weapon_pool_sizes (WeaponGun pool); Modifiers from
     # Engineering_Buff_Modifier_<ship> item's regenModifier (applies
     # powerRatio / maxAmmoLoad / maxRegenPerSec multipliers to the pool).
-    pool = ctx.weapon_pool_sizes.get(class_name.lower())
+    guid = (ctx.vehicles.get(class_name) or {}).get("guid")
+    pool = ctx.weapon_pool_sizes.get(guid) if guid else None
     weapons_block = {}
     # Reference always emits Controllers.Weapons.PoolSize, even when 0.0
     # (Cyclone Cargo/AA/RC/RN/TR variants, Storm_AA — ground vehicles with
@@ -3857,7 +3858,8 @@ def _enrich_shield_info(tree, loadout_entries, ctx, class_name=""):
         shields_node["FaceType"] = face_type
 
     # MaxItem from shield DynamicPowerPool maxItemCount
-    max_item = ctx.shield_pool_sizes.get(class_name.lower())
+    guid = (ctx.vehicles.get(class_name) or {}).get("guid")
+    max_item = ctx.shield_pool_sizes.get(guid) if guid else None
     if max_item is not None and max_item > 0:
         shields_node["MaxItem"] = float(max_item)
 

@@ -25,9 +25,9 @@ from .cosmetic import detect_cosmetic_variants
 from .ships import get_emitted_ship_classnames
 
 
-# Single-token variant markers used by `_ship_family_key`. When the first
-# of these tokens is encountered while walking the className parts, the
-# remainder is treated as a per-variant suffix.
+# Single-token variant markers used to derive a stripped family key. When
+# the first of these tokens is encountered while walking the className
+# parts, the remainder is treated as a per-variant suffix.
 _VARIANT_TOKENS = frozenset({
     "PU", "AI", "EA", "NPC", "Pirate", "Boarded", "Hijacked", "Crewless",
     "FleetWeek", "Fleetweek", "BIS", "CitizenCon2", "Showdown", "ShipShowdown",
@@ -37,8 +37,7 @@ _VARIANT_TOKENS = frozenset({
 })
 
 # Manufacturer prefixes seen in vehicle ClassNames. Stripped before
-# computing the family key so `AEGS_Idris_M` family = `Idris_M` (then
-# the longest-common-prefix logic across variants reduces to `Idris`).
+# computing the stripped family key.
 _MFR_CODES = frozenset({
     "AEGS", "ANVL", "RSI", "DRAK", "CRUS", "CNOU", "MISC", "ORIG",
     "KRGR", "ESPR", "XNAA", "BANU", "GAMA", "GRIN", "TMBL", "GREY",
@@ -73,20 +72,22 @@ def _strip_mfr_and_variant(prefix):
     return "_".join(parts)
 
 
-def _build_excluded_family_keys(ctx):
-    """Compute family-key substrings whose equipment should be filtered.
+def _build_family_keys(ctx):
+    """Build family-key → is_excluded map for ship-bound equipment filtering.
 
-    Strategy: group vehicles by `vehicleDefinition` (the impl XML they
-    share), then for each group derive a "family key" from the longest
-    common ClassName prefix (manufacturer + variant tokens stripped).
-    A family is excluded only when NONE of its variants are emitted.
+    Each ship family (group sharing a `vehicleDefinition`) contributes
+    two key forms — the longest common className prefix (e.g.
+    `RSI_Aurora_Mk2`) and the mfr/variant-stripped short form (e.g.
+    `Aurora_Mk2`). Both map to `is_excluded` (no emitted variants).
 
-    Examples (current corpus):
-      `RSI_Bengal_PU_AI_UEE_FleetWeek_2021` (single variant) -> 'Bengal'
-      `Orbital_Sentry_PU_NineTails` + 6 siblings -> 'Orbital_Sentry'
-      `AEGS_Idris_M`/`_P`/`_P_Collector_Military` (all emitted) -> not excluded
+    Lookup uses longest-substring-match: when an item's className
+    matches multiple keys, the longest wins. This discriminates between
+    Aurora Mk1 (excluded, key `Aurora`) and Aurora Mk2 (kept, key
+    `Aurora_Mk2`) for items like `RSI_Aurora_Mk2_Module_Cargo` that
+    contain both as substrings — without this, "any excluded match
+    wins" caused Mk2 modules to be dropped because of Mk1's status.
     """
-    cached = getattr(ctx, "_excluded_family_keys", None)
+    cached = getattr(ctx, "_family_keys", None)
     if cached is not None:
         return cached
 
@@ -94,27 +95,29 @@ def _build_excluded_family_keys(ctx):
     by_def = {}
     for cn, rec in ctx.vehicles.items():
         vd = ((rec.get("vehicle") or {}).get("vehicleDefinition", "") or "").lower()
-        # Vehicles without vehicleDefinition are placeholders; skip.
         if vd:
             by_def.setdefault(vd, []).append(cn)
 
-    excluded_keys = set()
+    family_keys = {}
     for vd, members in by_def.items():
-        if any(cn in emitted for cn in members):
-            continue  # family has at least one emitted variant; keep all
+        excluded = not any(cn in emitted for cn in members)
         common = _longest_common_prefix(members)
-        key = _strip_mfr_and_variant(common)
-        if key:
-            excluded_keys.add(key)
+        if common:
+            # When two families produce the same key, prefer included (any
+            # non-excluded family wins) — favor emission when ambiguous.
+            family_keys[common] = family_keys.get(common, excluded) and excluded
+        stripped = _strip_mfr_and_variant(common)
+        if stripped and stripped != common:
+            family_keys[stripped] = family_keys.get(stripped, excluded) and excluded
 
-    ctx._excluded_family_keys = excluded_keys
-    return excluded_keys
+    ctx._family_keys = family_keys
+    return family_keys
 
 
-def _is_npc_only_equipment(class_name, record, excluded_family_keys):
-    """Return True if the item is locked to a non-player ship or installation."""
+def _is_npc_only_equipment(class_name, record, family_keys):
+    """Return True if the item belongs to a non-emitted ship or NPC installation."""
     path = (record.get("path", "") or "").lower()
-    # Path-based NPC installations.
+    # Path-based NPC installations (not ship-bound).
     if "/weapons/turret_unmanned/" in path:
         return True
     if "/locations/" in path:
@@ -123,12 +126,15 @@ def _is_npc_only_equipment(class_name, record, excluded_family_keys):
     # rather than under a per-ship subdir; catch them by className prefix.
     if class_name.startswith("AI_Module_") or class_name.startswith("AIModule_"):
         return True
-    # Ship-bound equipment: className contains a family-key belonging to
-    # a fully-excluded ship family (no emitted variants).
-    for key in excluded_family_keys:
-        if key in class_name:
-            return True
-    return False
+    # Ship-bound equipment: longest-matching family key wins. Filter only
+    # if the most-specific matching family is excluded (no emitted variants).
+    best_len = 0
+    best_excluded = False
+    for key, excluded in family_keys.items():
+        if len(key) > best_len and key in class_name:
+            best_len = len(key)
+            best_excluded = excluded
+    return best_excluded
 
 
 def _is_non_equippable(class_name):
@@ -216,7 +222,7 @@ def build_ship_equipment(ctx):
         List of equipment item dicts
     """
     equipment_by_cn = {}
-    excluded_family_keys = _build_excluded_family_keys(ctx)
+    family_keys = _build_family_keys(ctx)
 
     for class_name, record in ctx.items.items():
         attach_def = record.get("attachDef")
@@ -251,7 +257,7 @@ def build_ship_equipment(ctx):
         # Skip equipment that belongs to non-emitted ships (Bengal,
         # Orbital_Sentry) or NPC-only installations (ground turrets,
         # outposts, AI_Module items).
-        if _is_npc_only_equipment(class_name, record, excluded_family_keys):
+        if _is_npc_only_equipment(class_name, record, family_keys):
             continue
 
         sub_type = attach_def.get("subType", "")

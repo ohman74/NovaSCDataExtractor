@@ -429,8 +429,8 @@ def run_extraction(config, args):
 
     print("\n[PARSE] Parsing entity files...")
     entity_data_map = {}
-    weapon_pool_sizes = {}  # className (lower) -> pool size
-    shield_pool_sizes = {}  # className (lower) -> shield maxItemCount
+    weapon_pool_sizes = {}  # entity GUID -> WeaponGun FixedPowerPool size (0 for DynamicPowerPool)
+    shield_pool_sizes = {}  # entity GUID -> Shield DynamicPowerPool maxItemCount
     inclusion_modes = {}    # className -> EAEntityDataParams.inclusionMode
     import re
     _POOL_RE = re.compile(r'FixedPowerPool\s+itemType="WeaponGun"\s+poolSize="(\d+)"')
@@ -442,7 +442,7 @@ def run_extraction(config, args):
     _INCLUSION_RE = re.compile(
         r'EAEntityDataParams[^>]*\binclusionMode="([^"]*)"'
     )
-    _ROOT_TAG_RE = re.compile(r'<EntityClassDefinition\.(\w+)')
+    _ROOT_TAG_RE = re.compile(r'<EntityClassDefinition\.(\w+)[^>]*__ref="([^"]+)"')
     for original, xml_file in entity_xml_map.items():
         data = parse_entity_file(xml_file)
         parsed_cn = ""
@@ -451,31 +451,26 @@ def run_extraction(config, args):
             if not parsed_cn:
                 parsed_cn = os.path.splitext(os.path.basename(original))[0]
             entity_data_map[parsed_cn] = data
-        # pool sizes are keyed by lowercase filename basename (existing convention);
-        # inclusion_modes are keyed by the parsed CamelCase ClassName to match
-        # ctx.vehicles.
-        fname_cn = os.path.splitext(os.path.basename(original))[0]
         try:
             with open(xml_file, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
-            m = _POOL_RE.search(content)
-            if m:
-                weapon_pool_sizes[fname_cn.lower()] = int(m.group(1))
-            elif _DYN_POOL_RE.search(content):
-                # DynamicPowerPool present → no fixed cap. Reference emits 0.
-                weapon_pool_sizes.setdefault(fname_cn.lower(), 0)
-            m2 = _SHIELD_POOL_RE.search(content)
-            if m2:
-                val = int(m2.group(1))
-                if val > 0:  # -1 means unlimited, don't emit
-                    shield_pool_sizes[fname_cn.lower()] = val
+            mr = _ROOT_TAG_RE.search(content)
+            cn_key = mr.group(1) if mr else parsed_cn
+            guid = mr.group(2) if mr else None
+            if guid:
+                m = _POOL_RE.search(content)
+                if m:
+                    weapon_pool_sizes[guid] = int(m.group(1))
+                elif _DYN_POOL_RE.search(content):
+                    # DynamicPowerPool present → no fixed cap. Reference emits 0.
+                    weapon_pool_sizes.setdefault(guid, 0)
+                m2 = _SHIELD_POOL_RE.search(content)
+                if m2:
+                    val = int(m2.group(1))
+                    if val > 0:  # -1 means unlimited, don't emit
+                        shield_pool_sizes[guid] = val
             m3 = _INCLUSION_RE.search(content)
-            if m3:
-                # The XML root is <EntityClassDefinition.<ClassName> …> —
-                # extract the CamelCase class name directly so it matches
-                # ctx.vehicles keys (not the lowercased filename).
-                mr = _ROOT_TAG_RE.search(content)
-                cn_key = mr.group(1) if mr else (parsed_cn or fname_cn)
+            if m3 and cn_key:
                 inclusion_modes[cn_key] = m3.group(1)
         except Exception:
             pass

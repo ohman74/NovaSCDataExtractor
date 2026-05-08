@@ -547,15 +547,6 @@ def get_vehicle_impl_data(vehicle_impls, vehicle_definition, class_name,
         basename = os.path.splitext(os.path.basename(vehicle_definition))[0]
         data = _get(basename)
     if data is None:
-        # Try matching by removing common suffixes
-        base = class_name.split("_")
-        for i in range(len(base), 1, -1):
-            candidate = "_".join(base[:i])
-            d = _get(candidate)
-            if d:
-                data = d
-                break
-    if data is None:
         return None
 
     # Apply inline modification overrides (Zeus_CL, F7C_Mk2, ...).
