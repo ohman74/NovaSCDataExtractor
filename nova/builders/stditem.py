@@ -172,25 +172,6 @@ _PAINTS_WITHOUT_CLASS = frozenset({
     "Paint_Starlifter_Pink_Pink_White",
 })
 
-# Specific MissileLauncher.MissileRack items ref omits Mass for
-# (ship-integrated rackracks like Aurora Mk2, BEHR_S02).
-_MISSILERACK_WITHOUT_MASS = frozenset({
-    "MRCK_S01_RSI_Aurora_Mk2_Combat_Module_Rack",
-    "GMRCK_S02_BEHR_Single_S02",
-})
-
-# Per-item Mass override: these items SHOULD have Mass despite matching
-# generic skip rules (volume=1 Turret, Remote turret, TurretBase, etc.).
-_MASS_FORCE_INCLUDE = frozenset({
-    "Mount_Gimbal_S1", "Mount_Gimbal_S1_NoSafety", "Mount_Gimbal_S1_Tractor",
-    "ANVL_Hornet_F7A_Mk1_Ball_Turret", "ANVL_Hornet_F7C_Ball_Turret",
-    "CNOU_Mustang_Gamma_Scoop_Front",
-    "DRAK_Cutlass_Steel_Rear_Remote_Dual_Turret_S4",
-    "DRAK_Fixed_Mount_S4",
-    "MISC_Hull_C_Nose_Turret_S5",
-    "ANVL_Hornet_F7C_Mk2_Cargo_Mod",
-})
-
 # Ship-integrated MissileLauncher.MissileRack items that ref omits Class for.
 # These are purpose-built for specific capital/large ships and aren't purchasable
 # standalone, so ref treats them like ship-integrated hardware.
@@ -270,7 +251,12 @@ _FPS_CLASS_OMIT = frozenset({
     "Multitool_Attachment",
 })
 
-# Specific FPS items where the default pattern-derived Class is wrong (ref uses empty).
+# Specific FPS items where the structural damage-profile rule produces a
+# Class value but ref emits "". Verified empirically — removing this set
+# regresses 5 of the 7 entries (the audit-doc "dead code" finding for
+# this set was wrong; the structural classifier *does* fire on these,
+# producing Ballistic / Energy (Laser) / Energy (Electron) values that
+# diverge from ref's empty Class).
 _FPS_CLASS_EMPTY = frozenset({
     "none_pistol_ballistic_01",
     "none_special_ballistic_01",
@@ -604,9 +590,6 @@ def build_std_item(record, ctx, external_loadout=None, nested=False):
         or base in _BASE_TYPES_NO_MASS
         or (volume_is_one and (base in _BASE_TYPES_NO_MASS_IF_V1 or full_type in _TYPES_NO_MASS_IF_V1))
     )
-    # Per-item allowlist: items that should have Mass despite generic skip rules.
-    if cn in _MASS_FORCE_INCLUDE:
-        skip_mass = False
     if not skip_mass:
         physics = components.get("physics", {})
         if physics.get("mass"):
