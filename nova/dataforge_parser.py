@@ -1337,6 +1337,22 @@ def _parse_weapon_params(comp):
     if fire_actions_elem is None:
         fire_actions_elem = comp
 
+    # Capture the SET of fireAction element names present so downstream
+    # classifiers can discriminate weapon types that the existing firingModes
+    # extractor doesn't surface (notably HealingBeam — used by crlf_medgun_01
+    # — which has no Single/Rapid/Burst/Charged mode and thus no entry in
+    # firing_modes). Stripped form: "SWeaponAction" prefix and "Params"
+    # suffix dropped, so "SWeaponActionFireHealingBeamParams" → "FireHealingBeam".
+    fire_action_types = []
+    for _child in list(fire_actions_elem):
+        _tag = _child.tag
+        if _tag.startswith("SWeaponAction") and _tag.endswith("Params"):
+            short = _tag[len("SWeaponAction"):-len("Params")]
+            if short not in fire_action_types:
+                fire_action_types.append(short)
+    if fire_action_types:
+        result["fireActionTypes"] = fire_action_types
+
     _top_tag_to_type = {
         "SWeaponActionFireSingleParams": "single",
         "SWeaponActionFireRapidParams": "rapid",

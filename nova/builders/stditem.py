@@ -252,11 +252,8 @@ _FPS_CLASS_OMIT = frozenset({
 })
 
 # Specific FPS items where the structural damage-profile rule produces a
-# Class value but ref emits "". Verified empirically — removing this set
-# regresses 5 of the 7 entries (the audit-doc "dead code" finding for
-# this set was wrong; the structural classifier *does* fire on these,
-# producing Ballistic / Energy (Laser) / Energy (Electron) values that
-# diverge from ref's empty Class).
+# Class value but ref emits "". `crlf_medgun_01` is now handled by the
+# pure-HealingBeam fireActions check in `_fps_class_value`.
 _FPS_CLASS_EMPTY = frozenset({
     "none_pistol_ballistic_01",
     "none_special_ballistic_01",
@@ -264,17 +261,14 @@ _FPS_CLASS_EMPTY = frozenset({
     "volt_sniper_energy_01",
     "behr_binoculars_01",
     "behr_gren_frag_01",
-    "crlf_medgun_01",
 })
 
 # Explicit FPS Class values by className — overrides all pattern-based rules.
 _FPS_CLASS_BY_CLASSNAME = {
-    # Multitool attachments
-    "grin_multitool_01_cutter": "Cutter",
-    "grin_multitool_01_healing": "Medical",
-    "grin_multitool_01_mining": "Mining",
-    "grin_multitool_01_salvage_repair": "Salvage and Repair",
-    "grin_multitool_01_tractorbeam": "Tractor Beam",
+    # Multitool sub-attachments removed — handled structurally by
+    # `WeaponAttachment.Utility + tags contains 'grin_multitool_01' +
+    # className suffix lookup` rule in `_fps_class_value` via
+    # `_MULTITOOL_SUFFIX_CLASS`.
     # Gadgets
     "grin_multitool_01": "Gadget",
     "grin_tractor_01": "Gadget",
@@ -442,7 +436,17 @@ def _get_fps_damage_profile(components, ctx):
     return None
 
 
-def _fps_class_value(class_name, full_type, mfr_code, damage_profile=None):
+_MULTITOOL_SUFFIX_CLASS = {
+    "_cutter": "Cutter",
+    "_healing": "Medical",
+    "_mining": "Mining",
+    "_salvage_repair": "Salvage and Repair",
+    "_tractorbeam": "Tractor Beam",
+}
+
+
+def _fps_class_value(class_name, full_type, mfr_code, damage_profile=None,
+                      fire_actions=None, tags="", name_is_placeholder=False):
     """Return (has_class, class_value) for an FPS item.
 
     has_class=False: omit Class field entirely.
@@ -459,12 +463,35 @@ def _fps_class_value(class_name, full_type, mfr_code, damage_profile=None):
     The manufacturer-prefix override list (_FPS_ENERGY_ELECTRON_PREFIXES)
     handles the Voltaic-family items whose ammo lacks distortion/stun
     but ref still labels Electron.
+
+    `fire_actions` is the set of fireAction element types from the weapon
+    component (e.g. {"FireHealingBeam", "FireSingle"}). Captures medgun-
+    style pure-healing weapons that have no Single/Rapid/Burst mode and
+    thus no entry in firingModes. `tags` is attachDef.tags string used
+    for the multitool sub-attachment structural rule.
     """
     # Light.Weapon and other opaque types → always omit
     if full_type == "Light.Weapon":
         return (False, None)
     if class_name in _FPS_CLASS_OMIT:
         return (False, None)
+    # Pure healing weapon (medgun-style): the weapon's fireActions list
+    # contains only HealingBeam — no Single/Rapid/Burst/Charged. Multitool
+    # variants share HealingBeam but combine it with other fireActions
+    # (Mining, Tractor, etc.), so the singleton-set check excludes them.
+    if fire_actions and fire_actions == {"FireHealingBeam"}:
+        return (True, "")
+    # Multitool sub-attachments (`grin_multitool_01_<role>`): structural
+    # signal is `WeaponAttachment.Utility + tags contains 'grin_multitool_01'
+    # + name != @LOC_PLACEHOLDER` (the placeholder excludes the template
+    # `Multitool_Attachment` which lives in _FPS_CLASS_OMIT). Suffix maps
+    # to ref's Class label.
+    if (full_type == "WeaponAttachment.Utility"
+            and "grin_multitool_01" in tags
+            and not name_is_placeholder):
+        for sfx, cls in _MULTITOOL_SUFFIX_CLASS.items():
+            if class_name.endswith(sfx):
+                return (True, cls)
     # Explicit per-item overrides (editorial deviations like ksar_smg's NBSP
     # label, klwe_smg's "Laser"-without-prefix, volt_pistol's "Energy (Laser)").
     if class_name in _FPS_CLASS_BY_CLASSNAME:
@@ -621,7 +648,11 @@ def build_std_item(record, ctx, external_loadout=None, nested=False):
     if is_fps and not nested:
         mfr_code = (mfr or {}).get("Code", "") if mfr else ""
         damage_profile = _get_fps_damage_profile(components, ctx)
-        has_cls, cls_val = _fps_class_value(class_name, full_type, mfr_code, damage_profile)
+        fire_actions = set(((components.get("weapon") or {}).get("fireActionTypes") or []))
+        tags = attach_def.get("tags", "") or ""
+        has_cls, cls_val = _fps_class_value(class_name, full_type, mfr_code, damage_profile,
+                                             fire_actions=fire_actions, tags=tags,
+                                             name_is_placeholder=name_is_placeholder)
         if has_cls:
             si["Class"] = cls_val
         should_have_class = False  # FPS path already set (or omitted) Class.
