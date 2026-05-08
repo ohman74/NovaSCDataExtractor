@@ -8,17 +8,23 @@
 | `_CLASS_OMIT_CLASSNAMES` | 15 | PARTIAL (PowerPlant subset reducible) | medium |
 | `_TURRETS_WITHOUT_CLASS` | 10 | NO STRUCTURAL SIGNAL | medium |
 | `_PAINTS_WITHOUT_CLASS` | 10 | NO STRUCTURAL SIGNAL | high |
-| `_MISSILERACK_WITHOUT_MASS` | 2 | DEAD CODE — defined, never referenced | high |
-| `_MASS_FORCE_INCLUDE` | 10 | DEAD CODE — generic skip-mass never fires for members | high |
 | `_MISSILERACK_WITHOUT_CLASS` | 23 | NO STRUCTURAL SIGNAL | high |
 | `_ARMOR_MEDIUM_WITH_CLASS` | 18 | NO STRUCTURAL SIGNAL | high |
 | `_FPS_CLASS_OMIT` | 3 | NO STRUCTURAL SIGNAL | medium |
-| `_FPS_CLASS_EMPTY` | 7 | DEAD CODE — items already fall through to `(True, "")` | high |
+| `_FPS_CLASS_EMPTY` | 7 | NO STRUCTURAL SIGNAL — editorial empty-Class allowlist | high |
 | `_FPS_CLASS_BY_CLASSNAME` | 15 | PARTIAL (multitool subset reducible) | medium |
 
 Notes on confidence: "high" means investigation produced a near-categorical
 answer (full corpus check or simulation); "medium" means there's a candidate
 discriminator but it either over-matches non-members or only handles a subset.
+
+**Implemented (commit 772187e):** `_MISSILERACK_WITHOUT_MASS` (2 entries)
+and `_MASS_FORCE_INCLUDE` (10 entries) confirmed dead code by build
+byte-diff and removed. Their sections were dropped from this doc.
+`_FPS_CLASS_EMPTY` was *also* flagged as dead code by the original
+audit but byte-diff revealed it was wrong (5 of 7 entries regress to
+non-empty Class via the structural ammo-damage-profile rule); the
+verdict has been corrected to `NO STRUCTURAL SIGNAL — editorial`.
 
 ---
 
@@ -348,76 +354,7 @@ underlying data difference from siblings that do get Class.
 
 ---
 
-## 7. `_MISSILERACK_WITHOUT_MASS` (line 177, 2 members) — **DEAD CODE**
-
-**Members.** `MRCK_S01_RSI_Aurora_Mk2_Combat_Module_Rack`,
-`GMRCK_S02_BEHR_Single_S02`.
-
-**Status.** Defined at line 177 but **never referenced anywhere in the
-nova/ codebase.** Verified with `Grep` (0 hits inside `nova/`,
-1 hit in `README.md`, 1 hit in `NAME_FILTERS.md`).
-
-**Cross-check vs ref output (`temp/reference/entry_3.json`):**
-- `GMRCK_S02_BEHR_Single_S02`: ref has `Mass=20.0` ✓
-- `MRCK_S01_RSI_Aurora_Mk2_Combat_Module_Rack`: ref has `Mass=20.0` ✓
-
-So even if the allowlist were active, ref *includes* Mass for these
-items. The set is mistaken about ref behaviour AND inactive in code.
-
-**Verdict: DEAD CODE.**
-
-**Implementation plan.** Delete the constant and the corresponding entry
-in `NAME_FILTERS.md` and `README.md`. No regression possible because
-nothing reads it.
-
----
-
-## 8. `_MASS_FORCE_INCLUDE` (line 184, 10 members) — **DEAD CODE**
-
-**Members.** 3× `Mount_Gimbal_S1*`, 2× `ANVL_Hornet_F7*_Ball_Turret`,
-`CNOU_Mustang_Gamma_Scoop_Front`, `DRAK_Cutlass_Steel_Rear_Remote_Dual_Turret_S4`,
-`DRAK_Fixed_Mount_S4`, `MISC_Hull_C_Nose_Turret_S5`,
-`ANVL_Hornet_F7C_Mk2_Cargo_Mod`.
-
-**What the set is *meant to* toggle.** Override `skip_mass=True` for
-these items (line 608).
-
-**Why it's dead code.** Generic `skip_mass` triggers only when
-`full_type in _TYPES_NO_MASS` or `base in _BASE_TYPES_NO_MASS` or volume==1
-*and* type is a v1-skip type. The members are:
-
-| ClassName | full_type | volume | skip_mass would apply? |
-|---|---|---|---|
-| Mount_Gimbal_S1 | Turret.GunTurret | 1 | **No** (Turret.GunTurret not in skip-list) |
-| ANVL_Hornet_F7A_Mk1_Ball_Turret | Turret.BallTurret | 1 | **No** |
-| ANVL_Hornet_F7C_Mk2_Cargo_Mod | Module.UNDEFINED | 1 | **No** |
-| CNOU_Mustang_Gamma_Scoop_Front | Turret.BallTurret | 1 | **No** |
-| DRAK_Cutlass_Steel_Rear_Remote_Dual_Turret_S4 | Turret.TopTurret | 84000 | **No** |
-| DRAK_Fixed_Mount_S4 | TurretBase.MannedTurret | 84000 | **No** |
-| MISC_Hull_C_Nose_Turret_S5 | Turret.BallTurret | 1 | **No** |
-| Mount_Gimbal_S1_NoSafety | Turret.GunTurret | 1 | **No** |
-| Mount_Gimbal_S1_Tractor | Turret.GunTurret | 1 | **No** |
-
-`skip_mass=False` for *all 10 members* even without the override.
-Verified by simulation (`temp/audit_low6.py`).
-
-Cross-check vs ref (`entry_3.json`): all members have `Mass` set in ref
-output. So both ref and our code already include Mass; the override is
-inactive.
-
-**Note about `entry_2.json`.** `entry_2.json` shows many `Mount_Gimbal_S1`
-entries *without* Mass — but those are loadout/installed-item *nested*
-references, not the standalone stdItem. The `nested=True` path doesn't
-emit Mass. The `_MASS_FORCE_INCLUDE` rule lives in the non-nested branch.
-
-**Verdict: DEAD CODE.**
-
-**Implementation plan.** Delete the constant and its single use at
-line 608. Verify no regressions with a build diff vs current output.
-
----
-
-## 9. `_MISSILERACK_WITHOUT_CLASS` (line 197, 23 members)
+## 7. `_MISSILERACK_WITHOUT_CLASS` (line 197, 23 members)
 
 **Members.** All `MRCK_S{01,02,03,04,05,06,09,12}_*` ship-rack items.
 
@@ -458,7 +395,7 @@ decision.
 
 ---
 
-## 10. `_ARMOR_MEDIUM_WITH_CLASS` (line 225, 18 members)
+## 8. `_ARMOR_MEDIUM_WITH_CLASS` (line 225, 18 members)
 
 **Members.** 3 AEGS_Sabre variants, 4 ANVL_Pisces/Gladiator items,
 8 ANVL_Hornet variants, 3 ORIG (100i/125a/135c).
@@ -497,7 +434,7 @@ parameters can land on different sides of the allowlist boundary.
 
 ---
 
-## 11. `_FPS_CLASS_OMIT` (line 267, 3 members)
+## 9. `_FPS_CLASS_OMIT` (line 267, 3 members)
 
 **Members.**
 - `gmni_optics_tsco_x4_s2` — `WeaponAttachment.IronSight`
@@ -532,44 +469,48 @@ signal but doesn't generalize.
 
 ---
 
-## 12. `_FPS_CLASS_EMPTY` (line 274, 7 members) — **DEAD CODE**
+## 10. `_FPS_CLASS_EMPTY` (line 274, 7 members)
 
 **Members.** `none_pistol_ballistic_01`, `none_special_ballistic_01`,
 `volt_shotgun_energy_01`, `volt_sniper_energy_01`, `behr_binoculars_01`,
 `behr_gren_frag_01`, `crlf_medgun_01`.
 
-**What the set is meant to toggle.** Force `(True, "")` from
+**What the set toggles.** Force `(True, "")` return from
 `_fps_class_value` (line 487).
 
-**Why it's dead code.** Without the allowlist, the function falls
-through to the trailing `return (True, "")` at line 523 anyway, *unless*
-the item has a damage profile that triggers an earlier branch.
+**Original audit conclusion (incorrect).** The first audit pass claimed
+this was dead code, on the theory that all 7 members had no
+`weapon.ammoParamsRecord` → `damage_profile=None` → fall through to the
+default `(True, "")` return. The simulation (`temp/audit_low7.py`)
+appeared to confirm this.
 
-Verified by simulation (`temp/audit_low7.py`):
+**Correction (commit 772187e).** Build byte-diff after deleting the
+allowlist showed 5 of 7 entries regressed:
 
 ```
-none_pistol_ballistic_01    damage_profile=None → (True, '')
-none_special_ballistic_01   damage_profile=None → (True, '')
-volt_shotgun_energy_01      damage_profile=None → (True, '')
-volt_sniper_energy_01       damage_profile=None → (True, '')
-behr_binoculars_01          damage_profile=None → (True, '')
-behr_gren_frag_01           damage_profile=None → (True, '')
-crlf_medgun_01              damage_profile=None → (True, '')
+crlf_medgun_01              Class:  '' → 'Energy (Laser)'
+none_pistol_ballistic_01    Class:  '' → 'Ballistic'
+none_special_ballistic_01   Class:  '' → 'Ballistic'
+volt_shotgun_energy_01      Class:  '' → 'Energy (Electron)'
+volt_sniper_energy_01       Class:  '' → 'Energy (Electron)'
 ```
 
-All seven items have no `weapon.ammoParamsRecord`, so
-`_get_fps_damage_profile` returns `None`, and the function falls to
-the line-523 default — same result as the allowlist would force.
+These 5 items *do* have a resolvable damage profile via
+`_get_fps_damage_profile` (the simulation harness mis-resolved it as
+`None`, hiding the regression). The structural ammo-damage-profile
+classifier fires on them, producing non-empty Class values that diverge
+from ref. The other 2 (`behr_binoculars_01`, `behr_gren_frag_01`)
+genuinely fall through, but the allowlist is needed to suppress the
+classifier on the 5 weapons.
 
-**Verdict: DEAD CODE.**
-
-**Implementation plan.** Delete the constant and the line-487 check.
-The seven items continue to receive `(True, "")` via the default
-fall-through. Verify with a build diff.
+**Verdict: NO STRUCTURAL SIGNAL — editorial empty-Class allowlist.**
+The 5 ref-empty entries can't be reduced because the structural
+classifier is *correct* about their damage profile and would emit a
+sensible label; ref simply chooses to omit it. Pure editorial.
 
 ---
 
-## 13. `_FPS_CLASS_BY_CLASSNAME` (line 285, 15 members)
+## 11. `_FPS_CLASS_BY_CLASSNAME` (line 285, 15 members)
 
 **Members and target Class values:**
 
@@ -656,20 +597,19 @@ Coverage: 5/15 entries reduced to a structural rule. The remaining
 
 ---
 
-## Summary of dead-code findings
+## Implemented (commit 772187e)
 
-Three sets are confirmed dead code and can be deleted with no behavioural
-change:
+`_MISSILERACK_WITHOUT_MASS` (2 entries) and `_MASS_FORCE_INCLUDE`
+(10 entries) — verified dead code by build byte-diff against snapshot,
+both removed. Net: 12 of 132 LOW-tier name entries removed (~9%).
+Their dedicated sections were dropped from this doc.
 
-1. **`_MISSILERACK_WITHOUT_MASS`** — never referenced inside `nova/`.
-2. **`_MASS_FORCE_INCLUDE`** — `skip_mass=False` for all 10 members
-   without the override.
-3. **`_FPS_CLASS_EMPTY`** — all 7 members fall through to the default
-   `(True, "")` return without the allowlist check.
+The audit also flagged `_FPS_CLASS_EMPTY` (7 entries) as dead code,
+but byte-diff revealed 5 of 7 regress to non-empty Class via the
+structural damage-profile classifier — the allowlist *is* live, and
+its verdict is corrected to `NO STRUCTURAL SIGNAL` above.
 
-That alone removes 19 of 132 LOW-tier name entries (14%).
-
-## Summary of partial reductions
+## Summary of partial reductions (open)
 
 - `_TOOLARM_WITH_TURRET`: replaceable with `'SCItemTurretParams' in
   components`, *if* DRAK_Vulture_Salvage_Arm is verified to also expose
@@ -687,7 +627,15 @@ That alone removes 19 of 132 LOW-tier name entries (14%).
 
 `_WEAPONDEFENSIVE_CN_WITHOUT_CLASS`, `_TURRETS_WITHOUT_CLASS`,
 `_PAINTS_WITHOUT_CLASS`, `_MISSILERACK_WITHOUT_CLASS`,
-`_ARMOR_MEDIUM_WITH_CLASS`, `_FPS_CLASS_OMIT` — all encode editorial
-decisions whose underlying signal is not in the item record. For
-`_ARMOR_MEDIUM_WITH_CLASS` in particular, two armors with byte-identical
-XML can land on different sides of the line.
+`_ARMOR_MEDIUM_WITH_CLASS`, `_FPS_CLASS_OMIT`, `_FPS_CLASS_EMPTY` — all
+encode editorial decisions whose underlying signal is not in the item
+record. For `_ARMOR_MEDIUM_WITH_CLASS` in particular, two armors with
+byte-identical XML can land on different sides of the line.
+
+**Process lesson.** The original audit ran member-by-member simulations
+in isolated harnesses (`temp/audit_low*.py`) without rebuilding to compare
+against the actual extractor output. For `_FPS_CLASS_EMPTY`, the
+isolated simulation mis-resolved the damage profile as `None` for items
+whose live extraction *does* find a profile, hiding the regression.
+Future audits should byte-diff against a real rebuild before claiming
+"dead code" — the simulation can lie.
