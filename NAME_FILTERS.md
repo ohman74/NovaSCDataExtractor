@@ -31,27 +31,7 @@ structural replacement is plausible but hasn't been attempted yet.
 
 ## HIGH — open
 
-### Pool-size lookups
-Files: `nova/builders/stditem.py:1395-1397`, `:3568`, `:3786`
-```python
-ctx.weapon_pool_sizes.get(class_name.lower(), 0)
-```
-The maps (`weapon_pool_sizes`, `shield_pool_sizes`) are keyed by
-lowercased class name. Name-based by construction. Candidate: store the
-pool map keyed by a GUID or structural reference from the source XML if
-one exists.
-
-### Vehicle-impl segment-stripping
-File: `nova/vehicle_impl_parser.py:496`
-```python
-base = class_name.split("_")
-for i in range(len(base), 1, -1):
-    candidate = "_".join(base[:i])
-```
-Fallback to find a vehicle-impl XML by progressively stripping
-className segments. Candidate: look up by `vehicle.vehicleDefinition`
-path (already a structural reference into the XML) rather than by
-class-name shape.
+(empty — all resolved)
 
 ---
 
