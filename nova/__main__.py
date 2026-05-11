@@ -39,6 +39,7 @@ from .builders.slices import (
     build_fps_equipment,
 )
 from .builders.resources import build_resources
+from .builders.blueprints import build_blueprints
 
 
 class BuildContext:
@@ -174,6 +175,7 @@ BUILDERS = {
     "vehicle_equipment":  ("vehicle_equipment.json",  build_vehicle_equipment,  False),
     "fps_equipment":      ("fps_equipment.json",      build_fps_equipment,      False),
     "resources":          ("resources.json",          build_resources,          False),
+    "blueprints":         ("blueprints.json",         build_blueprints,         False),
 }
 
 
