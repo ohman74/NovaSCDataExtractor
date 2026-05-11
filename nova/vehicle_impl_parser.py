@@ -41,15 +41,17 @@ def parse_vehicle_implementations(cache_dir):
         except Exception as e:
             failed += 1
 
-    # Variant overrides live in Modifications/<Variant>.xml. Each file has a
-    # <Modifications><Vehicle name="<Base>"> structure where the inner Vehicle
-    # element contains the full ports tree for the variant. The variant name
-    # comes from the filename (e.g. AEGS_Vanguard_Sentinel.xml). These need
-    # to be loaded so variant-specific port types/sizes/flags override the
-    # base vehicle's.
+    # Variant overrides live in Modifications/<Variant>.xml — applied only
+    # when the entity's VehicleComponentParams.modification field is set
+    # (e.g. modification="Sentinel" selects Modifications/AEGS_Vanguard_Sentinel.xml).
+    # We keep them in a separate index from base impls so that they never
+    # shadow a base file via filename collision. The orphan-data case that
+    # forced this split: Modifications/VNCL_Stinger.xml exists alongside the
+    # base vncl_stinger.xml; no entity references the override (every
+    # Stinger entity has modification=""), so it must not win the lookup.
     mod_dir = os.path.join(veh_dir, "Modifications")
+    variant_overrides = {}
     if os.path.isdir(mod_dir):
-        mod_parsed = 0
         for filename in os.listdir(mod_dir):
             if not filename.endswith(".xml"):
                 continue
@@ -58,16 +60,17 @@ def parse_vehicle_implementations(cache_dir):
             try:
                 data = _parse_modification_xml(filepath)
                 if data:
-                    # Carry the base name through but key by variant filename.
                     if not data.get("name"):
                         data["name"] = variant_name
-                    results[variant_name] = data
-                    mod_parsed += 1
+                    variant_overrides[variant_name] = data
             except Exception:
                 failed += 1
-        print(f"  Parsed {parsed} vehicle implementations + {mod_parsed} variants ({failed} failed)")
+        print(f"  Parsed {parsed} vehicle implementations + {len(variant_overrides)} variants ({failed} failed)")
     else:
         print(f"  Parsed {parsed} vehicle implementations ({failed} failed)")
+    # Stash variant overrides on the results dict under a reserved key so
+    # get_vehicle_impl_data can consult them when modification is set.
+    results["__variant_overrides__"] = variant_overrides
     return results
 
 
@@ -352,10 +355,23 @@ def _parse_item_port(part_elem):
     # `id` is the modification target identifier — inline <Modifications>
     # blocks reference these ids via `<Elem idRef="..." />` to override
     # specific port attributes per variant (Zeus_CL enables modCompCLTurret,
-    # F7C_Mk2 enables modPartPowerPlant02, etc.).
-    part_id = part_elem.get("id")
-    if part_id:
-        port["id"] = part_id
+    # F7C_Mk2 enables modPartPowerPlant02, etc.). The id can sit on the
+    # outer <Part> (e.g. modPartPowerPlant02 — used for skipPart toggles)
+    # OR on the inner <ItemPort> (e.g. modPortPowerPlant01 — used for
+    # size/flag overrides). Both can apply to the same port: F7C Mk2's
+    # modification list flips modPartPowerPlant02.skipPart=0 AND sets
+    # modPortPowerPlant01.minSize/maxSize=1, both targeting power-plant
+    # ports on the same impl. Capture both so the indexer can find this
+    # port under either reference.
+    ids = []
+    pid = part_elem.get("id")
+    if pid:
+        ids.append(pid)
+    ipid = ip_elem.get("id")
+    if ipid and ipid != pid:
+        ids.append(ipid)
+    if ids:
+        port["ids"] = ids
     # skipPart marks variant-only / disabled ports (Zeus EMP/QED, etc.) —
     # reference omits these entirely. Inline modifications can re-enable
     # via `<Elem idRef="<id>" name="skipPart" value="0" />`.
@@ -508,15 +524,22 @@ def get_vehicle_impl_data(vehicle_impls, vehicle_definition, class_name,
                           modification=None):
     """Look up vehicle implementation data by vehicleDefinition path or className.
 
-    Lookup is case-insensitive because vehicleDefinition paths from the game
-    data are lowercase while impl filenames use proper casing (AEGS_Gladius).
+    Resolution order (gated on the entity's `modification` field — the
+    structural signal of intent to use a variant override):
+    1. If `modification` is non-empty AND a Modifications/<className>.xml
+       override exists keyed by className → use that override.
+       (Sentinel, Hoplite, F7CM, Mustang Beta/Gamma/..., Cyclone variants.)
+    2. Otherwise, resolve the base impl by vehicleDefinition basename,
+       falling back to className. (Stinger, F7CM_Mk2 — entities whose
+       vehicleDefinition points at their own impl file.)
+    3. If `modification` is non-empty and the resolved impl carries an
+       inline `<Modification name="X">` block → apply its elem overrides
+       to the port tree. (F7C_Mk2/F7CR_Mk2/F7CS_Mk2 layered on F7A.xml;
+       Zeus CL/MR/ST layered on RSI_Zeus.xml.)
 
-    When `modification` matches a name in the impl's `inlineModifications`
-    map, the resolved data is a copy with that modification's elem
-    overrides applied to the port tree (skipPart toggles, port renames,
-    size changes, etc.). Used by Zeus variants (Zeus_CL/MR/ST inline
-    modifications in RSI_Zeus.xml) and F7C_Mk2 (inline mod in
-    ANVL_Hornet_F7A.xml).
+    Lookup is case-insensitive because vehicleDefinition paths from the
+    game data are lowercase while impl filenames use proper casing
+    (AEGS_Gladius).
 
     Args:
         vehicle_impls: dict from parse_vehicle_implementations
@@ -527,7 +550,8 @@ def get_vehicle_impl_data(vehicle_impls, vehicle_definition, class_name,
     Returns:
         parsed vehicle impl data dict, or None
     """
-    # Build a case-insensitive index once (cached on the dict)
+    # Case-insensitive index over base impls only — variant overrides live
+    # in a separate map and are only consulted when modification is set.
     idx = vehicle_impls.get("__lower_index__")
     if idx is None:
         idx = {k.lower(): k for k in vehicle_impls.keys() if not k.startswith("__")}
@@ -537,19 +561,32 @@ def get_vehicle_impl_data(vehicle_impls, vehicle_definition, class_name,
         orig = idx.get(key.lower())
         return vehicle_impls.get(orig) if orig else None
 
-    # Try by className exact match FIRST. Modifications/<Variant>.xml files
-    # supersede the base impl when present — e.g. AEGS_Vanguard_Sentinel.xml
-    # in Modifications/ overrides AEGS_Vanguard.xml's port types/sizes for
-    # the Sentinel variant. The vehicle's vehicleDefinition still points to
-    # the base file, so we have to prefer className for the lookup.
-    data = _get(class_name)
+    # 1. Variant override — only when modification is set. Modifications/
+    #    files keyed by className (AEGS_Vanguard_Sentinel etc.) take
+    #    precedence over the base impl pointed at by vehicleDefinition.
+    data = None
+    if modification:
+        overrides = vehicle_impls.get("__variant_overrides__") or {}
+        override_idx = vehicle_impls.get("__variant_overrides_lower__")
+        if override_idx is None:
+            override_idx = {k.lower(): k for k in overrides.keys()}
+            vehicle_impls["__variant_overrides_lower__"] = override_idx
+        orig = override_idx.get(class_name.lower())
+        if orig:
+            data = overrides.get(orig)
+
+    # 2. Base impl lookup by vehicleDefinition (authoritative path), then
+    #    className as fallback for entities whose vehicleDefinition is
+    #    missing or stale.
     if data is None and vehicle_definition:
         basename = os.path.splitext(os.path.basename(vehicle_definition))[0]
         data = _get(basename)
     if data is None:
+        data = _get(class_name)
+    if data is None:
         return None
 
-    # Apply inline modification overrides (Zeus_CL, F7C_Mk2, ...).
+    # 3. Apply inline modification (Zeus_CL, F7C_Mk2, ...).
     if modification and data.get("inlineModifications"):
         elems = data["inlineModifications"].get(modification)
         if elems:
@@ -578,8 +615,7 @@ def _apply_inline_modification(impl_data, elems):
         for p in ports:
             if not isinstance(p, dict):
                 continue
-            pid = p.get("id")
-            if pid:
+            for pid in p.get("ids") or ():
                 ports_by_id.setdefault(pid, []).append(p)
             _index(p.get("subPorts") or [])
 
