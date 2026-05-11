@@ -105,6 +105,34 @@ def _has_seat_port(loadout):
     return False
 
 
+def _has_armor_port(loadout):
+    """Return True if any port in the loadout tree is an armor mount.
+
+    Player-ownable ships all carry a `hardpoint_armor` (or `_armour`,
+    Anvil spelling) port that holds the ship's armor item — defining
+    HP, deflection, damage multipliers and EM/IR/cross-section
+    signatures. Verified across PTU 2026-05-11: 929/929 player-emitted
+    ships have one; the 26 records without are AI/derelict/template/
+    sentry/probe entities. The 25 obvious-name cases (Derelict_*,
+    Template, EAObjectiveDestructable, Orbital_Sentry, SalvageableDebris,
+    probe_comms) are caught by existing filters; one record
+    (AEGS_Idris_P_TSG) slips through with no name signal and turns up
+    as a duplicate 'Aegis Idris-P' row in metadata. This filter
+    structurally rejects it.
+    """
+    if not isinstance(loadout, list):
+        return False
+    for entry in loadout:
+        if not isinstance(entry, dict):
+            continue
+        n = entry.get("portName", "").lower()
+        if "armor" in n or "armour" in n:
+            return True
+        if _has_armor_port(entry.get("children", [])):
+            return True
+    return False
+
+
 def get_emitted_ship_classnames(ctx):
     """Return the set of vehicle ClassNames that pass all ship/vehicle filters.
 
@@ -135,6 +163,8 @@ def get_emitted_ship_classnames(ctx):
         if not _is_ground_vehicle(vehicle):
             if _is_non_pilotable(record):
                 continue
+        if _lacks_armor_port(record):
+            continue
         emitted.add(class_name)
 
     ctx._emitted_ship_classnames = emitted
@@ -154,6 +184,13 @@ def _is_non_pilotable(record):
     """
     loadout = record.get("components", {}).get("defaultLoadout", [])
     return not _has_seat_port(loadout)
+
+
+def _lacks_armor_port(record):
+    """Return True if the vehicle record has no armor port — a SQ42 /
+    scenario-only variant that should not surface as a player ship."""
+    loadout = record.get("components", {}).get("defaultLoadout", [])
+    return not _has_armor_port(loadout)
 
 
 def _is_ai_or_excluded_variant(class_name):
@@ -214,6 +251,8 @@ def build_ships(ctx):
         if _is_placeholder_record(record):
             continue
         if _is_non_pilotable(record):
+            continue
+        if _lacks_armor_port(record):
             continue
         if _is_not_included(class_name, ctx):
             continue
