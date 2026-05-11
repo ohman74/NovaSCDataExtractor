@@ -38,6 +38,7 @@ from .builders.slices import (
     build_vehicle_equipment,
     build_fps_equipment,
 )
+from .builders.resources import build_resources
 
 
 class BuildContext:
@@ -172,6 +173,7 @@ BUILDERS = {
     "vehicle_hardpoints": ("vehicle_hardpoints.json", build_vehicle_hardpoints, True),
     "vehicle_equipment":  ("vehicle_equipment.json",  build_vehicle_equipment,  False),
     "fps_equipment":      ("fps_equipment.json",      build_fps_equipment,      False),
+    "resources":          ("resources.json",          build_resources,          False),
 }
 
 
@@ -557,6 +559,7 @@ def run_extraction(config, args):
                        weapon_recoil_configs=weapon_recoil_configs,
                        misfire_defs=misfire_defs)
     ctx.matrix = matrix_data
+    ctx.cache_dir = config.cache_dir
 
     # Build output
     categories = args.only if args.only else list(BUILDERS.keys())
