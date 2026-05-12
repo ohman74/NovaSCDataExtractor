@@ -37,9 +37,40 @@ populate the variant→base mapping written to
 from __future__ import annotations
 
 import os
+import re
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from typing import Iterable
+
+
+# Internal handle pattern: `SomeType[ABCD]` where ABCD is 3-8 hex chars.
+# CIG entity records carry many of these as references to interaction
+# points / shared params blocks; the hex part is an auto-generated
+# instance ID with no semantic content. Two otherwise-identical items
+# (e.g. Valkyrie Turret_Top vs Valkyrie Turret_Top_CitizenCon) can
+# carry different hex IDs across every nested reference, which would
+# otherwise cause items_cosmetic_equivalent to falsely report them as
+# distinct. Stripping the hex suffix during comparison removes that
+# noise while preserving the comparison of every real attribute value.
+_HEX_HANDLE_RE = re.compile(r"\[[0-9A-Fa-f]{3,8}\]")
+
+
+def _strip_hex_handles(v):
+    """Recursively replace `[HEX]` handle suffixes in string values."""
+    if isinstance(v, str):
+        return _HEX_HANDLE_RE.sub("[H]", v)
+    if isinstance(v, dict):
+        return {k: _strip_hex_handles(vv) for k, vv in v.items()}
+    if isinstance(v, list):
+        return [_strip_hex_handles(x) for x in v]
+    return v
+
+
+def _values_equivalent(a, b):
+    """Equal as-is, or equal after hex-handle normalization."""
+    if a == b:
+        return True
+    return _strip_hex_handles(a) == _strip_hex_handles(b)
 
 
 # ───────────────────────── gameplay allow-lists ──────────────────────────
@@ -279,7 +310,7 @@ def items_cosmetic_equivalent(items_db, cn_a, cn_b):
             continue
         if k in ("attachDef", "components"):
             continue
-        if a.get(k) != b.get(k):
+        if not _values_equivalent(a.get(k), b.get(k)):
             return False
 
     ad_a = a.get("attachDef") or {}
@@ -287,7 +318,7 @@ def items_cosmetic_equivalent(items_db, cn_a, cn_b):
     for k in set(ad_a) | set(ad_b):
         if k in COSMETIC_ATTACHDEF_FIELDS:
             continue
-        if ad_a.get(k) != ad_b.get(k):
+        if not _values_equivalent(ad_a.get(k), ad_b.get(k)):
             return False
 
     ca = a.get("components") or {}
@@ -297,7 +328,7 @@ def items_cosmetic_equivalent(items_db, cn_a, cn_b):
     for k in ca:
         if k in COSMETIC_ITEM_COMPONENTS:
             continue
-        if ca[k] != cb[k]:
+        if not _values_equivalent(ca[k], cb[k]):
             return False
     return True
 
