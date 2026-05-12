@@ -58,10 +58,14 @@ def _resolve_modifier(modifier: dict, ctx) -> dict:
     return {
         "GPP": gpp_class,
         "PropertyName": prop_name,
+        # "multiplier" — value is a float multiplier on the base property
+        # (e.g. Integrity 0.8x → 1.2x). "additive" — value is an integer
+        # delta added to the base property (e.g. Power Pips +2).
+        "Kind": modifier.get("kind", "multiplier"),
         "QualityRange": [modifier.get("startQuality", 0),
-                          modifier.get("endQuality", 0)],
+                         modifier.get("endQuality", 0)],
         "ModifierRange": [modifier.get("modifierAtStart", 0),
-                           modifier.get("modifierAtEnd", 0)],
+                          modifier.get("modifierAtEnd", 0)],
     }
 
 

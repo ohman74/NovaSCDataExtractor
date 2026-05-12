@@ -700,13 +700,31 @@ def _parse_blueprint_slot(slot_elem):
     modifiers = []
     for mod in slot_elem.findall(".//CraftingGameplayPropertyModifierCommon"):
         gpp_guid = mod.get("gameplayPropertyRecord", "")
+        # Two value-range tag types coexist in CIG's crafting data:
+        # - ValueRange_Linear: float multiplier (modifierAtStart/-End).
+        #   Used for percentage-style buffs (Integrity 0.8x → 1.2x).
+        # - ValueRange_LinearIntegerAdditive: integer delta added to the
+        #   base property (additiveModifierAtStart/-End). Used for discrete
+        #   step changes (Power Pips +2, Magazine size +1, etc.).
+        # findall on `_Linear` does NOT match `_LinearIntegerAdditive`
+        # (ET tag matching is exact), so both must be queried.
         for vr in mod.findall(".//CraftingGameplayPropertyModifierValueRange_Linear"):
             modifiers.append({
                 "gppGuid": gpp_guid,
+                "kind": "multiplier",
                 "startQuality": safe_int(vr.get("startQuality", "0")),
                 "endQuality": safe_int(vr.get("endQuality", "0")),
                 "modifierAtStart": safe_float(vr.get("modifierAtStart", "1")),
                 "modifierAtEnd": safe_float(vr.get("modifierAtEnd", "1")),
+            })
+        for vr in mod.findall(".//CraftingGameplayPropertyModifierValueRange_LinearIntegerAdditive"):
+            modifiers.append({
+                "gppGuid": gpp_guid,
+                "kind": "additive",
+                "startQuality": safe_int(vr.get("startQuality", "0")),
+                "endQuality": safe_int(vr.get("endQuality", "0")),
+                "modifierAtStart": safe_int(vr.get("additiveModifierAtStart", "0")),
+                "modifierAtEnd": safe_int(vr.get("additiveModifierAtEnd", "0")),
             })
 
     costs = []

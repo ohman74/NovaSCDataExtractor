@@ -341,10 +341,15 @@ def _build_crafting_block(record, ctx):
             mods_out = []
             for mod in slot.get("modifiers", []):
                 gpp = ctx.gpp_records.get(mod["gppGuid"], {})
+                # Kind: "multiplier" (float, mul) vs "additive" (int delta).
+                # Default to multiplier for legacy records that pre-date the
+                # `kind` field. ModifierAtStart/-End values are typed
+                # accordingly by the parser.
                 mods_out.append({
                     "Property": gpp.get("className", ""),
                     "PropertyName": gpp.get("propertyName", ""),
                     "UnitFormat": gpp.get("unitFormat", ""),
+                    "Kind": mod.get("kind", "multiplier"),
                     "ModifierAtStart": mod.get("modifierAtStart", 1.0),
                     "ModifierAtEnd": mod.get("modifierAtEnd", 1.0),
                     "StartQuality": mod.get("startQuality", 0),
