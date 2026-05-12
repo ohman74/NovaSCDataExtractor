@@ -43,6 +43,9 @@ def build_vehicles(ctx):
             if base_cn:
                 veh["CosmeticVariant"] = True
                 veh["CosmeticVariantOf"] = base_cn
+            variant_base = ctx.variants.get(class_name)
+            if variant_base:
+                veh["VariantOf"] = variant_base
             vehicles.append(veh)
 
     vehicles.sort(key=lambda v: v.get("Name", ""))

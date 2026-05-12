@@ -488,3 +488,127 @@ def _impl_xml_for_vehicle(vehicle_record, impl_modifications):
     extracts the basename to look up modifications)."""
     vd = (vehicle_record.get("vehicle") or {}).get("vehicleDefinition", "")
     return vd or ""
+# ─────────────────────────── VariantOf classifier ───────────────────────
+#
+# A looser sibling-grouping than CosmeticVariantOf. Two ships are
+# `VariantOf` siblings iff:
+#   1. Same `vehicleDefinition` (impl XML).
+#   2. Same armor className (from the `hardpoint_armor`/`hardpoint_armour`
+#      loadout port — armor defines HP, deflection, signature multipliers,
+#      so equal armor → equal defensive tier).
+#   3. Same structural-modification signature — hash of port-affecting
+#      <Elem>s in the ship's `modification` block. Port-affecting Elems
+#      are those that change the *chassis topology*: minSize, maxSize,
+#      flags (uneditable, etc.), skipPart, types, requiredTags, portTags.
+#      Mass/damageMax tweaks do not break the match — those are
+#      load-out-like and OK.
+#
+# Within each group, the **base** is the shortest className (alphabetical
+# tiebreak); others are emitted with `VariantOf: <base_className>`.
+# Singletons get no tag. Ships without a resolvable armor port are skipped
+# from grouping. CosmeticVariantOf is a strict subset — paint-only variants
+# get both tags.
+
+# Mod <Elem>s that change the chassis topology — any of these in a
+# ship's modification block makes that ship its own structural variant.
+PORT_AFFECTING_MOD_ELEMS = frozenset({
+    "minSize", "maxSize", "flags", "skipPart",
+    "types", "requiredTags", "portTags",
+})
+
+
+def _structural_mod_signature(impl_path, mod_name, impl_modifications):
+    """Stable hash of port-affecting Elems in the given modification.
+
+    Returns "" when the ship has no modification or when the modification
+    is purely cosmetic (e.g. only display-name tweaks, only mass overrides).
+    Two ships with the same return value have structurally identical port
+    topology under their shared impl.
+    """
+    import hashlib
+    if not mod_name or not impl_path:
+        return ""
+    key = os.path.splitext(os.path.basename(impl_path))[0].lower()
+    mods = impl_modifications.get(key)
+    if not mods or mod_name not in mods:
+        return ""
+    structural = sorted(
+        (id_ref, name, value) for id_ref, name, value in mods[mod_name]
+        if name in PORT_AFFECTING_MOD_ELEMS
+    )
+    if not structural:
+        return ""
+    return hashlib.sha1(repr(structural).encode()).hexdigest()[:12]
+
+
+def _armor_classname_for_ship(xml_path, items_db):
+    """Resolve the ship's armor item className from its entity-XML loadout.
+
+    Looks for the loadout entry on `hardpoint_armor` or `hardpoint_armour`
+    (Anvil spelling). Resolves entityClassReference GUIDs through items_db.
+    Returns "" when no armor port is present (filters out scenario-only
+    template ships like AEGS_Idris_P_TSG).
+    """
+    guid_to_class = _guid_index_for(items_db)
+    try:
+        root = ET.parse(xml_path).getroot()
+    except ET.ParseError:
+        return ""
+    for e in root.iter("SItemPortLoadoutEntryParams"):
+        port = e.get("itemPortName", "")
+        if port not in ("hardpoint_armor", "hardpoint_armour"):
+            continue
+        cls = e.get("entityClassName", "")
+        if cls:
+            return cls
+        ref = e.get("entityClassReference", "")
+        if ref:
+            return guid_to_class.get(ref.lower(), "")
+        return ""
+    return ""
+
+
+def identify_variants(
+    vehicles_by_class: dict,
+    entity_xml_by_class: dict,
+    items_db: dict,
+    impl_modifications: dict,
+    kept_class_names: Iterable[str] | None = None,
+) -> dict:
+    """Map each variant ClassName to its base ClassName via the loose rule.
+
+    Groups ships by (impl_basename, armor_className, structural_mod_sig).
+    Within each group, the shortest-named member is the base; others get
+    a `VariantOf: <base>` tag at emit time.
+
+    Ships without a resolvable armor port are excluded from grouping —
+    these are typically scenario / TSG / unmanned variants that don't
+    represent player-ownable chassis.
+    """
+    kept = set(kept_class_names) if kept_class_names is not None else set(vehicles_by_class)
+
+    # Group ships by (impl, armor_cn, mod_signature).
+    groups = defaultdict(list)
+    for cn, record in vehicles_by_class.items():
+        if cn not in kept or cn not in entity_xml_by_class:
+            continue
+        vehicle = record.get("vehicle") or {}
+        impl = vehicle.get("vehicleDefinition", "").lower()
+        if not impl:
+            continue
+        armor_cn = _armor_classname_for_ship(entity_xml_by_class[cn], items_db)
+        if not armor_cn:
+            continue  # No armor port → scenario template, skip.
+        mod_name = vehicle.get("modification", "")
+        sig = _structural_mod_signature(impl, mod_name, impl_modifications)
+        groups[(impl, armor_cn, sig)].append(cn)
+
+    variant_to_base = {}
+    for (_impl, _armor, _sig), members in groups.items():
+        if len(members) < 2:
+            continue
+        members_sorted = sorted(members, key=lambda x: (len(x), x))
+        base = members_sorted[0]
+        for cn in members_sorted[1:]:
+            variant_to_base[cn] = base
+    return variant_to_base

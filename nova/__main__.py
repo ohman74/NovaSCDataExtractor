@@ -28,6 +28,7 @@ from .vehicle_impl_parser import parse_vehicle_implementations
 from .utils import parse_localization, resolve_name
 from .cosmetic_classifier import (
     identify_cosmetic_variants,
+    identify_variants,
     load_impl_xml_modifications,
 )
 from .socpak_parser import build_ship_storage_index
@@ -52,7 +53,8 @@ class BuildContext:
                  ship_storage_index=None, ifcs_modifiers=None,
                  crafting_blueprints=None, gpp_records=None,
                  recoil_configs=None, recoil_modifiers=None,
-                 weapon_recoil_configs=None, misfire_defs=None):
+                 weapon_recoil_configs=None, misfire_defs=None,
+                 variants=None):
         self.items = items_by_class
         self.vehicles = vehicles_by_class
         self.guids = guid_to_class
@@ -73,6 +75,11 @@ class BuildContext:
         # cosmetic_classifier. The extractor filters these so each cosmetic
         # group is represented by its base ClassName only.
         self.cosmetic_variants = cosmetic_variants or set()
+        # {variant_classname: base_classname} for the looser sibling rule
+        # (same chassis + armor + structural-mod sig; different default
+        # loadouts permitted). Strict superset of cosmetic_variants on
+        # ships that have a resolvable armor port.
+        self.variants = variants or {}
         # ship className -> {item_classname: count, ...} for interior
         # PersonalStorage placements walked from .socpak archives. Used by the
         # Storage builder to emit crew-locker entries not reachable through
@@ -533,13 +540,21 @@ def run_extraction(config, args):
         vehicles_by_class, entity_xml_by_class, items_by_class, impl_modifications,
     )
     print(f"  Identified {len(cosmetic_variants)} cosmetic-only variants")
-    # Emit for downstream audit tools (compare_matrix) so they can recognise
-    # matrix SKUs intentionally tagged as cosmetic-of-base. Stored as a
-    # {variant: base} mapping; the legacy `sorted(...)` form is still
-    # readable as a list of variant ClassNames via `list(d.keys())`.
     cv_path = os.path.join(config.cache_dir, "cosmetic_variants.json")
     with open(cv_path, "w", encoding="utf-8") as f:
         json.dump(cosmetic_variants, f, indent=2, sort_keys=True)
+
+    # Looser sibling grouping — same chassis (impl) + same armor +
+    # same structural-mod signature; default-loadout swaps are allowed.
+    # This catches Teach's / Collector / Wikelo / event-skin variants
+    # that a player would consider "the same ship, restocked differently".
+    variants = identify_variants(
+        vehicles_by_class, entity_xml_by_class, items_by_class, impl_modifications,
+    )
+    print(f"  Identified {len(variants)} variant-of-base mappings")
+    v_path = os.path.join(config.cache_dir, "variants.json")
+    with open(v_path, "w", encoding="utf-8") as f:
+        json.dump(variants, f, indent=2, sort_keys=True)
 
     # Walk ship-interior socpak archives to count PersonalStorage placements
     # per ship. Emits {className: {item_classname: count, ...}, ...} keyed by
@@ -575,7 +590,8 @@ def run_extraction(config, args):
                        recoil_configs=recoil_configs,
                        recoil_modifiers=recoil_modifiers,
                        weapon_recoil_configs=weapon_recoil_configs,
-                       misfire_defs=misfire_defs)
+                       misfire_defs=misfire_defs,
+                       variants=variants)
     ctx.matrix = matrix_data
     ctx.cache_dir = config.cache_dir
 

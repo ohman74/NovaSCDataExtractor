@@ -273,6 +273,11 @@ def build_ships(ctx):
             if base_cn:
                 ship["CosmeticVariant"] = True
                 ship["CosmeticVariantOf"] = base_cn
+            # Looser sibling tag — same chassis + armor + structural mod;
+            # default-loadout swaps OK. Catches Teach/Collector/event skins.
+            variant_base = ctx.variants.get(class_name)
+            if variant_base:
+                ship["VariantOf"] = variant_base
             ships.append(ship)
 
     ships.sort(key=lambda s: s.get("Name", ""))
