@@ -105,13 +105,13 @@ _CLASS_VALUE_OVERRIDES = {
     "COOL_AEGS_S04_Reclaimer": "Industrial",
     "COOL_ORIG_S04_890J_SCItem": "Civilian",
     "COOL_WCPR_S03_Elsen_SCItem": "Civilian",
-    "POWR_LPLT_S00_Radix_SCItem_SM_TE": "Civilian",
+    # POWR_LPLT_S00_Radix_SCItem_SM_TE: removed (generic rule produces 'Civilian' from LPLT mfr — same as override)
     "POWR_ORIG_S04_890J_SCItem": "Civilian",
     "QDMP_RSI_S03_Captor": "",
     "QDRV_ORIG_S04_890J_SCItem": "Civilian",
     "QED_RSI_S03_Scorpius": "",
     "SHLD_AEGS_S04_Reclaimer_SCItem": "Industrial",
-    "SHLD_GODI_S04_Idris_Pirate_SCItem": "",
+    # SHLD_GODI_S04_Idris_Pirate_SCItem: removed (item not emitted to output, filtered upstream)
     "SHLD_GODI_S04_Idris_SCItem": "",
     "SHLD_RSI_S04_Polaris_SCItem": "Industrial",
     # Specific items where ref uses special Class values.
@@ -139,7 +139,7 @@ _CLASS_OMIT_CLASSNAMES = frozenset({
     "Mining_Laser_THCN_Helix_S0",
     "POWR_AEGS_S04_Idris_SCItem",
     "POWR_AEGS_S04_Reclaimer_SCItem",
-    "POWR_RSI_S04_Bengal_SCItem",
+    # POWR_RSI_S04_Bengal_SCItem: removed (item not emitted to output)
     "RADR_GNRP_S03_Idris_TEMP",
     "RADR_RSI_S04_Polaris",
     "RADR_WLOP_S03_Lephari",
@@ -176,10 +176,9 @@ _PAINTS_WITHOUT_CLASS = frozenset({
 # These are purpose-built for specific capital/large ships and aren't purchasable
 # standalone, so ref treats them like ship-integrated hardware.
 _MISSILERACK_WITHOUT_CLASS = frozenset({
-    "MRCK_S01_TMBL_Storm_AA_Custom",
-    "MRCK_S02_ORIG_100i_Dual_S02",
-    "MRCK_S02_ORIG_125a_Quad_S02",
-    "MRCK_S02_TMBL_Storm_AA_Custom",
+    # 4 placeholder-name entries removed (TMBL_Storm + ORIG_100i/125a) — name=@LOC_PLACEHOLDER/@LOC_EMPTY
+    # already lands no-Class via the generic rule; the override was redundant.
+    # MRCK_S12_AEGS_Javelin removed — not emitted to output (filtered upstream).
     "MRCK_S03_VNCL_Quad_S01",
     "MRCK_S03_VNCL_Quad_S01_Blade",
     "MRCK_S04_RSI_Constellation",
@@ -198,7 +197,6 @@ _MISSILERACK_WITHOUT_CLASS = frozenset({
     "MRCK_S09_AEGS_Eclipse",
     "MRCK_S09_AEGS_Retaliator_Fore",
     "MRCK_S09_AEGS_Retaliator_Rear",
-    "MRCK_S12_AEGS_Javelin",
 })
 
 # Armor.Medium follows an opaque rule: only specific ship variants have Class.
