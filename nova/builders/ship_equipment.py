@@ -1,8 +1,8 @@
 """Build ship equipment JSON with full stdItem data.
 
 Cosmetic variants (LowPoly duplicates, color/skin variants with identical
-gameplay stats) are emitted with `CosmeticVariant: true` flags rather than
-filtered out — see `cosmetic.py`.
+gameplay stats) are emitted with `CosmeticVariantOf: <base>` tags rather
+than filtered out — see `cosmetic.py`.
 
 Editorial filters that REMAIN (these are not cosmetic; they have real
 gameplay differences or are non-player templates):
@@ -144,10 +144,10 @@ def _is_non_equippable(class_name):
     re-audited 2026-05-06): every category here has been tested against
     structural alternatives that all over-filter legitimate items.
 
-    What was REMOVED 2026-05-06 (now handled by CosmeticVariant tagging):
+    What was REMOVED 2026-05-06 (now handled by CosmeticVariantOf tagging):
     - `_LowPoly` suffix items: byte-for-byte identical to base items, now
-      emitted with `CosmeticVariant: true, CosmeticVariantOf: <base>`.
-      Detection is via signature comparison + className-prefix match.
+      emitted with `CosmeticVariantOf: <base>`. Detection is via signature
+      comparison + className-prefix match.
     """
     cn = class_name.lower()
 
@@ -213,7 +213,7 @@ def build_ship_equipment(ctx):
     """Build the ship equipment output dataset with full stdItem.
 
     Cosmetic variants (LowPoly + color/skin/tint duplicates with identical
-    gameplay signatures) are emitted with `CosmeticVariant: true` flags.
+    gameplay signatures) are emitted with `CosmeticVariantOf: <base>` tags.
 
     Args:
         ctx: BuildContext
@@ -289,16 +289,14 @@ def build_ship_equipment(ctx):
         equipment_by_cn, lambda e: e["stdItem"]
     )
     for cn, base_cn in cosmetic_map.items():
-        equipment_by_cn[cn]["cosmeticVariant"] = True
         equipment_by_cn[cn]["cosmeticVariantOf"] = base_cn
         std = equipment_by_cn[cn]["stdItem"]
         if std:
-            std["CosmeticVariant"] = True
             std["CosmeticVariantOf"] = base_cn
 
     equipment = list(equipment_by_cn.values())
     equipment.sort(key=lambda e: (e.get("type", ""), e.get("size", 0), e.get("className", "")))
-    cosmetic_count = sum(1 for e in equipment if e.get("cosmeticVariant"))
+    cosmetic_count = sum(1 for e in equipment if e.get("cosmeticVariantOf"))
     print(f"  Built {len(equipment)} ship equipment items "
           f"({cosmetic_count} cosmetic variants tagged)")
     return equipment

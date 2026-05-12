@@ -14,8 +14,8 @@ from .ships import (
 def build_vehicles(ctx):
     """Build the vehicles output dataset (ground vehicles only).
 
-    Emits cosmetic-only paint/livery variants with `CosmeticVariant: true`
-    + `CosmeticVariantOf: <base>` flags rather than filtering them.
+    Emits cosmetic-only paint/livery variants with `CosmeticVariantOf: <base>`
+    rather than filtering them.
     """
     vehicles = []
 
@@ -41,7 +41,6 @@ def build_vehicles(ctx):
             veh["MovementClass"] = vehicle.get("movementClass", "")
             base_cn = _cosmetic_base(class_name, ctx)
             if base_cn:
-                veh["CosmeticVariant"] = True
                 veh["CosmeticVariantOf"] = base_cn
             variant_base = ctx.variants.get(class_name)
             if variant_base:

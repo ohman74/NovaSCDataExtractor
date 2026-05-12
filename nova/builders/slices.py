@@ -17,11 +17,11 @@ from .vehicles import build_vehicles
 
 
 # Fields that belong in each slice, in the order reference emits them.
-# CosmeticVariant + CosmeticVariantOf are appended to all three slices so
-# consumers can hide/group cosmetic-only paint variants without re-running
-# the classifier.
+# CosmeticVariantOf + VariantOf are appended to all three slices so consumers
+# can hide/group cosmetic-only paint variants and looser chassis siblings
+# without re-running the classifier.
 _METADATA_FIELDS = ["ClassName", "Name", "Manufacturer", "Career", "Role", "Size", "Cargo", "Type",
-                    "CosmeticVariant", "CosmeticVariantOf", "VariantOf",
+                    "CosmeticVariantOf", "VariantOf",
                     "FlightReady", "Thumbnail"]
 _STATS_FIELDS = [
     "ClassName", "Name", "Description", "Career", "Role", "Size", "Cargo",
@@ -33,12 +33,12 @@ _STATS_FIELDS = [
     # Ground-vehicle dynamics (wheeled + tracked). Absent on spaceships.
     "SteerCharacteristics", "DriveCharacteristics",
     "TrackSteerCharacteristics", "TrackWheeledCharacteristics",
-    "CosmeticVariant", "CosmeticVariantOf", "VariantOf",
+    "CosmeticVariantOf", "VariantOf",
     "FlightReady",
 ]
 _HARDPOINTS_FIELDS = ["ClassName", "Name", "IsSpaceship", "IsVehicle", "IsGravlev", "PortTags", "Hull", "Hardpoints",
-                       "CosmeticVariant", "CosmeticVariantOf", "VariantOf",
-                       "FlightReady"]
+                     "CosmeticVariantOf", "VariantOf",
+                     "FlightReady"]
 
 
 def _empty_commlink():

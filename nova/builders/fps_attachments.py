@@ -3,7 +3,7 @@
 Filters to weapon-mountable FPS attachments only (sights, barrels, underbarrel, lights).
 Excludes ship weapon barrels and templates. Cosmetic variants (color/tint
 duplicates with identical gameplay-modifier signatures) are emitted with
-`CosmeticVariant: true` flags rather than filtered out.
+`CosmeticVariantOf: <base>` tags rather than filtered out.
 """
 
 from .stditem import build_std_item
@@ -60,8 +60,8 @@ def build_fps_attachments(ctx):
     """Build the FPS attachments output dataset.
 
     Cosmetic variants (color/tint/skin duplicates with identical
-    gameplay-modifier signatures) are emitted with `CosmeticVariant: true`
-    flags via the shared cosmetic-detection helper.
+    gameplay-modifier signatures) are emitted with `CosmeticVariantOf: <base>`
+    via the shared cosmetic-detection helper.
     """
     attachments_by_cn = {}
 
@@ -102,16 +102,14 @@ def build_fps_attachments(ctx):
         attachments_by_cn, lambda a: a["stdItem"]
     )
     for cn, base_cn in cosmetic_map.items():
-        attachments_by_cn[cn]["cosmeticVariant"] = True
         attachments_by_cn[cn]["cosmeticVariantOf"] = base_cn
         std = attachments_by_cn[cn]["stdItem"]
         if std:
-            std["CosmeticVariant"] = True
             std["CosmeticVariantOf"] = base_cn
 
     attachments = list(attachments_by_cn.values())
     attachments.sort(key=lambda a: (a.get("type", ""), a.get("className", "")))
-    cosmetic_count = sum(1 for a in attachments if a.get("cosmeticVariant"))
+    cosmetic_count = sum(1 for a in attachments if a.get("cosmeticVariantOf"))
     print(f"  Built {len(attachments)} FPS attachments "
           f"({cosmetic_count} cosmetic variants tagged)")
     return attachments

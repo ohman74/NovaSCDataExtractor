@@ -271,7 +271,6 @@ def build_ships(ctx):
             # localization, paint ports, rename-only mods).
             base_cn = _cosmetic_base(class_name, ctx)
             if base_cn:
-                ship["CosmeticVariant"] = True
                 ship["CosmeticVariantOf"] = base_cn
             # Looser sibling tag — same chassis + armor + structural mod;
             # default-loadout swaps OK. Catches Teach/Collector/event skins.

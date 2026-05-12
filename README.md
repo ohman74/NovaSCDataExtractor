@@ -117,7 +117,7 @@ The output format is stable across runs and documented field-by-field in
 `DATA_SOURCES.md`. A few intentional design choices to be aware of:
 
 1. **DPS rounding** — `AMRS_LaserCannon_S4`, `APAR_MassDriver_S2`, `KLWE_MassDriver_S2` each end up ±0.01 off some external sources for one DPS value. Python's `round()` uses banker's rounding; matching the other rounding mode would require IEEE 754 float-aware rounding that breaks other weapons.
-2. **FPS catalogue includes cosmetic variants** — `fps_equipment.json` emits **all** player-equippable FPS items including skin variants (`apar_special_ballistic_01_black02`, etc.). Cosmetic variants are tagged inline with `CosmeticVariant: true` + `CosmeticVariantOf: <base_classname>` so consumers can hide, aggregate, or expose them as desired. See `nova/builders/cosmetic.py`.
+2. **FPS catalogue includes cosmetic variants** — `fps_equipment.json` emits **all** player-equippable FPS items including skin variants (`apar_special_ballistic_01_black02`, etc.). Cosmetic variants are tagged inline with `CosmeticVariantOf: <base_classname>` so consumers can hide, aggregate, or expose them as desired. See `nova/builders/cosmetic.py`.
 3. **Extended equipment surface** — additional gameplay fields are surfaced on every ship/FPS item: per-firing-mode `Recoil`, `Crafting`, magazine `Capacity`, `Aim` block, `PowerModes`, `Durability.Wear`, ammunition `Projectile`/`Impulse`/`ArmorPenetration`. Additive only — existing fields preserved.
 
 ## How the `stdItem` format is built
@@ -170,7 +170,7 @@ The builders translate the game's component-based entity data into the flatter `
 Two distinct cosmetic systems run during build:
 
 - **Ship-level** (`nova/cosmetic_classifier.py`) — XML-diffs ships sharing the same `vehicleDefinition`; cosmetic-only siblings are filtered from emit. Writes `cache/cosmetic_variants.json` for downstream tools.
-- **Item-level** (`nova/builders/cosmetic.py`) — hashes a "gameplay signature" of each stdItem record (stripping cosmetic shell fields). Variants are *tagged* with `CosmeticVariant: true` + `CosmeticVariantOf: <base>` rather than dropped, so consumers can hide or aggregate them as desired.
+- **Item-level** (`nova/builders/cosmetic.py`) — hashes a "gameplay signature" of each stdItem record (stripping cosmetic shell fields). Variants are *tagged* with `CosmeticVariantOf: <base>` rather than dropped, so consumers can hide or aggregate them as desired.
 
 ## Caching
 

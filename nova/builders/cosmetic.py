@@ -35,8 +35,7 @@ _COSMETIC_FIELDS = frozenset({
     "Classification",
     "Class",
     "Crafting",
-    # CosmeticVariant flags themselves should never be in a signature
-    "CosmeticVariant",
+    # CosmeticVariantOf tag itself should never be in a signature.
     "CosmeticVariantOf",
 })
 

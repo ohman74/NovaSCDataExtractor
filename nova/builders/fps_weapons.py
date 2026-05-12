@@ -2,8 +2,8 @@
 
 Emits ALL player-equippable FPS weapons including cosmetic variants.
 Items that are pure skin/color/tint variants of a base weapon are
-emitted with `CosmeticVariant: true` and `CosmeticVariantOf: <base>`
-flags so consumers can hide or aggregate them as desired.
+emitted with `CosmeticVariantOf: <base>` so consumers can hide or
+aggregate them as desired.
 
 Filter chain:
 1. Structural: must have a player-weapon component (SMeleeWeapon...,
@@ -83,8 +83,8 @@ def build_fps_weapons(ctx):
 
     Emits all player-equippable FPS weapons. Items that are cosmetic
     variants of a base weapon (same gameplay signature, classname is a
-    suffix-extension of the base) get `CosmeticVariant: true` +
-    `CosmeticVariantOf: <base_classname>` flags.
+    suffix-extension of the base) get a `CosmeticVariantOf: <base_classname>`
+    tag.
     """
     all_weapons = {}
 
@@ -145,16 +145,14 @@ def build_fps_weapons(ctx):
         all_weapons, lambda w: w["stdItem"], get_skin_tag=_skin_tag
     )
     for cn, base_cn in cosmetic_map.items():
-        all_weapons[cn]["cosmeticVariant"] = True
         all_weapons[cn]["cosmeticVariantOf"] = base_cn
         std = all_weapons[cn]["stdItem"]
         if std:
-            std["CosmeticVariant"] = True
             std["CosmeticVariantOf"] = base_cn
 
     weapons = list(all_weapons.values())
     weapons.sort(key=lambda w: (w.get("type", ""), w.get("className", "")))
-    cosmetic_count = sum(1 for w in weapons if w.get("cosmeticVariant"))
+    cosmetic_count = sum(1 for w in weapons if w.get("cosmeticVariantOf"))
     print(f"  Built {len(weapons)} FPS weapons "
           f"({cosmetic_count} cosmetic variants tagged)")
     return weapons
