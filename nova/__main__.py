@@ -489,15 +489,31 @@ def run_extraction(config, args):
 
     print("\n[PARSE] Classifying cosmetic-only ship variants...")
     # Per-ClassName path to the per-ship entity XML (already converted).
+    # CRITICAL: filter to *entity* XMLs only. The Implementations/Xml tree
+    # contains both the per-impl files (e.g. aegs_avenger.xml) AND a
+    # Modifications/ subfolder (e.g. Modifications/AEGS_Avenger_Warlock.xml)
+    # — those Modifications files share a basename with the real entity XML
+    # at Libs/Foundry/Records/entities/spaceships/aegs_avenger_warlock.xml,
+    # so a naive basename-only match can pick the wrong file. Force builds
+    # are particularly affected because convert_entities' ThreadPoolExecutor
+    # populates entity_xml_map in non-deterministic order, so the
+    # Modifications/ file sometimes wins. Result observed 2026-05-12 with
+    # PTU 4.8: AEGS_Avenger_Warlock and RSI_Constellation_Phoenix tagged as
+    # cosmetic variants of Titan/Taurus because both sides were empty
+    # Modifications/ files that compared equal.
     entity_xml_by_class = {}
+    _ENTITY_DIR_TOKENS = (
+        os.sep.join(["entities", "spaceships"]).lower(),
+        os.sep.join(["entities", "groundvehicles"]).lower(),
+    )
     for original, xml_file in entity_xml_map.items():
-        # entity_xml_map keys are original file paths; look up by basename
-        # (lowercased) matches the ClassName case-insensitively, but
-        # entity_data_map keys are the CamelCase ClassNames. Prefer those.
+        # Only consider files that live under the per-ship entity tree.
+        # Modifications/, Implementations/, Loadouts/, etc. are not entity
+        # XMLs and must not feed the cosmetic-variant classifier.
+        norm = original.replace("/", os.sep).lower()
+        if not any(tok in norm for tok in _ENTITY_DIR_TOKENS):
+            continue
         cn_lower = os.path.splitext(os.path.basename(original))[0].lower()
-        # Find the CamelCase ClassName matching this file stem.
-        # Use entity_data_map if it was parsed; otherwise fall back to
-        # vehicles_by_class keys.
         matched = None
         for cn in vehicles_by_class:
             if cn.lower() == cn_lower:
