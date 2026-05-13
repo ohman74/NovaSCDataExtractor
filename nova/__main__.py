@@ -41,6 +41,12 @@ from .builders.slices import (
 )
 from .builders.resources import build_resources
 from .builders.blueprints import build_blueprints
+from .builders.missions import build_missions
+from .builders.factions import build_factions
+from .builders.standings import build_standings
+from .builders.localities import build_localities
+from .builders.tags import build_tags
+from .builders.mission_types import build_mission_types
 
 
 class BuildContext:
@@ -54,7 +60,11 @@ class BuildContext:
                  crafting_blueprints=None, gpp_records=None,
                  recoil_configs=None, recoil_modifiers=None,
                  weapon_recoil_configs=None, misfire_defs=None,
-                 variants=None):
+                 variants=None,
+                 blueprint_pools=None, faction_reputation=None,
+                 standings=None, reputation_scopes=None, localities=None,
+                 contract_rewards=None, scenario_rewards=None, tags=None,
+                 mission_types=None, contract_templates=None):
         self.items = items_by_class
         self.vehicles = vehicles_by_class
         self.guids = guid_to_class
@@ -111,6 +121,35 @@ class BuildContext:
         # WeaponMisfireDef records keyed by GUID — jam mechanics. 5 records
         # total, shared by fire-type (burst/rapid/single/charge/beam).
         self.misfire_defs = misfire_defs or {}
+        # ---------- Blueprint reward catalog ----------
+        # BlueprintPoolRecord by GUID. Each pool holds weighted blueprint refs.
+        self.blueprint_pools = blueprint_pools or {}
+        # FactionReputation records by GUID — what contracts reference as
+        # @factionReputation. Carries the localized DisplayName + HQ/Leadership/…
+        self.faction_reputation = faction_reputation or {}
+        # SReputationStandingParams by GUID — single rank steps (Neutral,
+        # Elite Contractor, …) referenced from contracts as @min/maxStanding.
+        self.standings = standings or {}
+        # SReputationScopeParams by GUID — rep ladders (factionreputationscope).
+        self.reputation_scopes = reputation_scopes or {}
+        # MissionLocality by GUID — region/sub-region (Nyx, Pyro_RegionA, …).
+        self.localities = localities or {}
+        # Flat list of contract entries (CareerContract / Contract) that carry
+        # <BlueprintRewards>. See dataforge_parser._parse for the shape.
+        self.contract_rewards = contract_rewards or []
+        # Flat list of scenario-tier reward entries (ScenarioProgress).
+        self.scenario_rewards = scenario_rewards or []
+        # Tag catalog from TagDatabase.TagDatabase.xml. {guid: {TagName, Path,
+        # Description?}}. Sub-region + mission-type-capability + zone-property
+        # tags used by location filters.
+        self.tags = tags or {}
+        # MissionType records by GUID — {className, localisedTypeName, …}.
+        # Resolved via contract_templates (template GUID → MissionType GUID).
+        self.mission_types = mission_types or {}
+        # ContractTemplate records by GUID — {className, missionTypeGuid}.
+        self.contract_templates = contract_templates or {}
+        # Reverse index built downstream in __main__: bp_guid → [{Kind, …}].
+        self.reward_sources_by_bp_guid = {}
 
     def resolve_name(self, raw_name):
         return resolve_name(raw_name, self.translations)
@@ -183,6 +222,12 @@ BUILDERS = {
     "fps_equipment":      ("fps_equipment.json",      build_fps_equipment,      False),
     "resources":          ("resources.json",          build_resources,          False),
     "blueprints":         ("blueprints.json",         build_blueprints,         False),
+    "missions":           ("missions.json",           build_missions,           False),
+    "factions":           ("factions.json",           build_factions,           False),
+    "standings":          ("standings.json",          build_standings,          False),
+    "localities":         ("localities.json",         build_localities,         False),
+    "tags":               ("tags.json",               build_tags,               False),
+    "mission_types":      ("mission_types.json",      build_mission_types,      False),
 }
 
 
@@ -269,6 +314,87 @@ def package_output(config):
     size_mb = os.path.getsize(zip_path) / (1024 * 1024)
     print(f"  Packaged {file_count} files -> {zip_path} ({size_mb:.1f} MB)")
     return zip_path
+
+
+def _build_reward_sources_index(ctx):
+    """Build ctx.reward_sources_by_bp_guid: blueprint_guid (lowercased) → list
+    of reward-source records.
+
+    Walks contract_rewards and scenario_rewards once, expanding each pool
+    reference to its constituent blueprints. Each entry references upstream
+    catalogs by ClassName (Mission/Pool) so consumers join via the dedicated
+    output files rather than embedding redundant metadata.
+    """
+    pools_by_guid = ctx.blueprint_pools
+    bp_index = {}
+
+    # Mekanism A — Contract-bundna BlueprintRewards
+    for c in ctx.contract_rewards:
+        mission_cn = c.get("debugName") or c.get("handlerDebugName") or ""
+        for br in c.get("blueprintRewards", []):
+            pool = pools_by_guid.get(br.get("poolGuid", "").lower()) \
+                or pools_by_guid.get(br.get("poolGuid", ""))
+            if not pool:
+                continue
+            pool_cn = pool.get("className", "")
+            rewards = pool.get("rewards", [])
+            sum_w = sum(r.get("weight", 1) for r in rewards) or 1
+            chance = br.get("chance", 1.0)
+            results_mask = br.get("missionResultsMask", [])
+            on_results = _decode_mission_results(results_mask)
+            for r in rewards:
+                bp_guid_raw = r.get("bpGuid", "")
+                if not bp_guid_raw:
+                    continue
+                bp_guid = bp_guid_raw.lower()
+                eff = chance * (r.get("weight", 1) / sum_w)
+                bp_index.setdefault(bp_guid, []).append({
+                    "Kind": "Contract",
+                    "MissionClassName": mission_cn,
+                    "PoolClassName": pool_cn,
+                    "EffectiveChance": round(eff, 6),
+                    "OnMissionResults": on_results,
+                })
+
+    # Mekanism B — ScenarioProgress tiers
+    for s in ctx.scenario_rewards:
+        scen_cn = s.get("scenarioClassName", "")
+        for tier in s.get("tiers", []):
+            min_pts = tier.get("minPoints", 0)
+            mission_cn = f"{scen_cn}.Tier_{min_pts}"
+            for pool_guid in tier.get("poolGuids", []):
+                pool = pools_by_guid.get(pool_guid.lower()) \
+                    or pools_by_guid.get(pool_guid)
+                if not pool:
+                    continue
+                pool_cn = pool.get("className", "")
+                for r in pool.get("rewards", []):
+                    bp_guid_raw = r.get("bpGuid", "")
+                    if not bp_guid_raw:
+                        continue
+                    bp_index.setdefault(bp_guid_raw.lower(), []).append({
+                        "Kind": "ScenarioTier",
+                        "MissionClassName": mission_cn,
+                        "PoolClassName": pool_cn,
+                        "MinPoints": min_pts,
+                    })
+
+    ctx.reward_sources_by_bp_guid = bp_index
+
+
+# Mission-result-mask index → human-readable enum string. CIG's mission engine
+# uses 5 boolean slots; observed semantics from contract data:
+_MISSION_RESULT_NAMES = ["Success", "FailedTimeout", "FailedDeath", "Aborted", "Failed"]
+
+
+def _decode_mission_results(mask):
+    """Turn a 5-bool array (from <missionResults><Bool value="X"/>) into a
+    list of result-name strings."""
+    out = []
+    for i, b in enumerate(mask):
+        if b and i < len(_MISSION_RESULT_NAMES):
+            out.append(_MISSION_RESULT_NAMES[i])
+    return out
 
 
 def main():
@@ -435,8 +561,15 @@ def run_extraction(config, args):
     (items_by_class, vehicles_by_class, guid_to_class, manufacturers,
      ammo_params, inventory_containers, gimbal_modifiers, ifcs_modifiers,
      crafting_blueprints, gpp_records, recoil_configs, recoil_modifiers,
-     weapon_recoil_configs, misfire_defs) = \
+     weapon_recoil_configs, misfire_defs,
+     blueprint_pools, faction_reputation, standings, reputation_scopes,
+     localities, contract_rewards, scenario_rewards,
+     mission_types, contract_templates) = \
         stream_parse_dataforge(xml_path, config.cache_dir)
+
+    print("\n[PARSE] Parsing TagDatabase...")
+    from .tag_db_parser import parse_tag_database
+    tags = parse_tag_database(config.cache_dir)
 
     print("\n[PARSE] Parsing entity files...")
     entity_data_map = {}
@@ -591,9 +724,27 @@ def run_extraction(config, args):
                        recoil_modifiers=recoil_modifiers,
                        weapon_recoil_configs=weapon_recoil_configs,
                        misfire_defs=misfire_defs,
-                       variants=variants)
+                       variants=variants,
+                       blueprint_pools=blueprint_pools,
+                       faction_reputation=faction_reputation,
+                       standings=standings,
+                       reputation_scopes=reputation_scopes,
+                       localities=localities,
+                       contract_rewards=contract_rewards,
+                       scenario_rewards=scenario_rewards,
+                       tags=tags,
+                       mission_types=mission_types,
+                       contract_templates=contract_templates)
     ctx.matrix = matrix_data
     ctx.cache_dir = config.cache_dir
+
+    # Build reverse index: blueprint_guid → list of reward sources. Used by
+    # the blueprints builder to emit RewardSources[] on each blueprint and by
+    # the missions builder to emit BlueprintRewards[].TargetClassNames[] for
+    # the reverse-lookup view. Built once here so neither builder walks the
+    # contract list twice.
+    _build_reward_sources_index(ctx)
+    print(f"  Indexed reward sources for {len(ctx.reward_sources_by_bp_guid)} blueprints")
 
     # Build output
     categories = args.only if args.only else list(BUILDERS.keys())

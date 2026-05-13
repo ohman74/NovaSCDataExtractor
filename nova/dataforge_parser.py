@@ -52,6 +52,15 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
             "recoil_modifiers": os.path.join(cache_dir, "parsed_recoil_modifiers.json"),
             "weapon_recoil_configs": os.path.join(cache_dir, "parsed_weapon_recoil_configs.json"),
             "misfire_defs": os.path.join(cache_dir, "parsed_misfire_defs.json"),
+            "blueprint_pools": os.path.join(cache_dir, "parsed_blueprint_pools.json"),
+            "faction_reputation": os.path.join(cache_dir, "parsed_faction_reputation.json"),
+            "standings": os.path.join(cache_dir, "parsed_standings.json"),
+            "reputation_scopes": os.path.join(cache_dir, "parsed_reputation_scopes.json"),
+            "localities": os.path.join(cache_dir, "parsed_localities.json"),
+            "contract_rewards": os.path.join(cache_dir, "parsed_contract_rewards.json"),
+            "scenario_rewards": os.path.join(cache_dir, "parsed_scenario_rewards.json"),
+            "mission_types": os.path.join(cache_dir, "parsed_mission_types.json"),
+            "contract_templates": os.path.join(cache_dir, "parsed_contract_templates.json"),
         }
 
         if all(os.path.isfile(f) for f in cache_files.values()):
@@ -69,13 +78,26 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
                   f"{len(data['recoil_configs'])} recoil configs, "
                   f"{len(data['recoil_modifiers'])} recoil modifiers, "
                   f"{len(data['weapon_recoil_configs'])} weapon recoil cfgs, "
-                  f"{len(data['misfire_defs'])} misfire defs")
+                  f"{len(data['misfire_defs'])} misfire defs, "
+                  f"{len(data['blueprint_pools'])} bp pools, "
+                  f"{len(data['faction_reputation'])} factions, "
+                  f"{len(data['standings'])} standings, "
+                  f"{len(data['localities'])} localities, "
+                  f"{len(data['contract_rewards'])} contract rewards, "
+                  f"{len(data['scenario_rewards'])} scenario rewards, "
+                  f"{len(data['mission_types'])} mission types, "
+                  f"{len(data['contract_templates'])} contract templates")
             return (data["items"], data["vehicles"], data["guids"],
                     data["manufacturers"], data["ammo"], data["inventory"],
                     data["gimbal_modifiers"], data["ifcs_modifiers"],
                     data["crafting"], data["gpp"],
                     data["recoil_configs"], data["recoil_modifiers"],
-                    data["weapon_recoil_configs"], data["misfire_defs"])
+                    data["weapon_recoil_configs"], data["misfire_defs"],
+                    data["blueprint_pools"], data["faction_reputation"],
+                    data["standings"], data["reputation_scopes"],
+                    data["localities"], data["contract_rewards"],
+                    data["scenario_rewards"],
+                    data["mission_types"], data["contract_templates"])
 
     print(f"  Parsing {xml_path}...")
     size_mb = os.path.getsize(xml_path) / (1024 * 1024)
@@ -96,6 +118,18 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
     recoil_modifiers = {}  # modifiers-guid -> {hands: {...}, aim: {...}, body: {...}, head: {...}}
     weapon_recoil_configs = {}  # guid -> {hands, aim, body, head} per-firing-mode base curves
     misfire_defs = {}  # guid -> {minorDuration, minorCooldown, majorCooldown}
+    # Blueprint reward catalog ------------------------------------------------
+    # All keyed by record __ref (lowercased? No — keep raw and have consumers
+    # normalize at lookup time; matches existing pattern for crafting_blueprints).
+    blueprint_pools = {}      # guid -> {className, rewards: [{bp_guid, weight}]}
+    faction_reputation = {}    # guid -> {className, displayName, …loc fields, logo, isNPC, lawful}
+    standings = {}             # guid -> {className, name, displayName, minReputation, gated}
+    reputation_scopes = {}     # guid -> {className, scopeName, displayName, standingGuids[]}
+    localities = {}            # guid -> {className, availableLocations[]}
+    contract_rewards = []       # flat list — see _parse_contract_generator
+    scenario_rewards = []       # flat list — see _parse_scenario_progress
+    mission_types = {}          # guid -> {className, localisedTypeName, svgIconPath, iconName}
+    contract_templates = {}     # guid -> {className, missionTypeGuid}
 
     start = time.time()
     entity_count = 0
@@ -118,7 +152,12 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
                               "ActorProceduralRecoilConfig",
                               "ActorProceduralRecoilModifiers",
                               "WeaponProceduralRecoilConfigDef",
-                              "WeaponMisfireDef"):
+                              "WeaponMisfireDef",
+                              "BlueprintPoolRecord", "FactionReputation",
+                              "SReputationStandingParams", "SReputationScopeParams",
+                              "MissionLocality", "ContractGenerator",
+                              "ScenarioProgress",
+                              "MissionType", "ContractTemplate"):
                 in_record = True
             continue
 
@@ -259,9 +298,14 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
             bp = _parse_crafting_blueprint(elem)
             if bp:
                 # Index by target entity GUID — multiple blueprints could target
-                # the same item (variants), keep the first encountered.
+                # the same item (variants), keep the first encountered. The
+                # blueprint record's own GUID is preserved as bp["blueprintGuid"]
+                # so downstream code can join pool references (which point at
+                # the *blueprint* GUID, not the target item GUID) back to the
+                # target.
                 target = bp.pop("targetGuid", "")
                 if target and target not in crafting_blueprints:
+                    bp["blueprintGuid"] = guid
                     crafting_blueprints[target] = bp
             elem.clear()
 
@@ -330,6 +374,283 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
                 }
             elem.clear()
 
+        elif elem_type == "BlueprintPoolRecord":
+            # Pool of blueprint references with relative weights. Refed by
+            # contracts (BlueprintRewards/@blueprintPool) and scenario tiers.
+            in_record = False
+            guid = elem.get("__ref", "")
+            tag = elem.tag
+            cls = tag.split(".", 1)[1] if "." in tag else ""
+            if guid:
+                rewards = []
+                for r in elem.findall("blueprintRewards/BlueprintReward"):
+                    rewards.append({
+                        "bpGuid": r.get("blueprintRecord", ""),
+                        "weight": safe_float(r.get("weight", "1")),
+                    })
+                blueprint_pools[guid] = {"className": cls, "rewards": rewards}
+            elem.clear()
+
+        elif elem_type == "FactionReputation":
+            # Reputation-system faction (what contracts reference via
+            # ContractGeneratorHandler_*/@factionReputation). Carries the
+            # localized DisplayName plus rich metadata under propertiesBB
+            # (Headquarters / Leadership / Area / Focus / …).
+            in_record = False
+            guid = elem.get("__ref", "")
+            tag = elem.tag
+            cls = tag.split(".", 1)[1] if "." in tag else ""
+            if guid:
+                entry = {
+                    "className": cls,
+                    "displayName": elem.get("displayName", ""),
+                    "logo": elem.get("logo", ""),
+                    "isNPC": safe_bool(elem.get("isNPC", "0")),
+                    # Lawful from className suffix — there is no factionType
+                    # field on FactionReputation; CIG encodes it in the name.
+                    "lawful": "_Lawful_" in cls,
+                }
+                # Extra metadata strings live under propertiesBB.
+                for prop in elem.findall("propertiesBB/SReputationContextBBPropertyParams"):
+                    pname = prop.get("name", "")
+                    if not pname:
+                        continue
+                    val_elem = prop.find("dynamicProperty/SBBDynamicPropertyLocString")
+                    if val_elem is None:
+                        continue
+                    raw = val_elem.get("value", "")
+                    # Map CIG's property names → cleaner keys.
+                    key_map = {
+                        "entityDescription": "description",
+                        "entityHeadquarters": "headquarters",
+                        "entityFounded": "founded",
+                        "entityLeadership": "leadership",
+                        "entityArea": "area",
+                        "entityFocus": "focus",
+                    }
+                    out_key = key_map.get(pname)
+                    if out_key and raw:
+                        entry[out_key] = raw
+                faction_reputation[guid] = entry
+            elem.clear()
+
+        elif elem_type == "SReputationStandingParams":
+            # One rank step within a reputation scope (e.g. "Neutral",
+            # "Elite Contractor"). Referenced from contracts via
+            # @minStanding / @maxStanding.
+            guid = elem.get("__ref", "")
+            tag = elem.tag
+            cls = tag.split(".", 1)[1] if "." in tag else ""
+            if guid:
+                standings[guid] = {
+                    "className": cls,
+                    "name": elem.get("name", ""),
+                    "displayName": elem.get("displayName", ""),
+                    "minReputation": safe_int(elem.get("minReputation", "0")),
+                    "gated": safe_bool(elem.get("gated", "0")),
+                }
+            elem.clear()
+
+        elif elem_type == "SReputationScopeParams":
+            # Container for a list of standings (a "rep ladder"). Contract
+            # generators reference it via @reputationScope.
+            in_record = False
+            guid = elem.get("__ref", "")
+            tag = elem.tag
+            cls = tag.split(".", 1)[1] if "." in tag else ""
+            if guid:
+                standing_refs = [
+                    r.get("value", "")
+                    for r in elem.findall("standingMap/standings/Reference")
+                ]
+                reputation_scopes[guid] = {
+                    "className": cls,
+                    "scopeName": elem.get("scopeName", ""),
+                    "displayName": elem.get("displayName", ""),
+                    "standingGuids": standing_refs,
+                }
+            elem.clear()
+
+        elif elem_type == "MissionLocality":
+            # Region/sub-region locality (Nyx, Pyro, Pyro_RegionA, …). The
+            # className suffix IS the region name; CIG does not localize it.
+            in_record = False
+            guid = elem.get("__ref", "")
+            tag = elem.tag
+            cls = tag.split(".", 1)[1] if "." in tag else ""
+            if guid:
+                locs = [
+                    r.get("value", "")
+                    for r in elem.findall("availableLocations/Reference")
+                ]
+                localities[guid] = {
+                    "className": cls,
+                    "availableLocations": locs,
+                }
+            elem.clear()
+
+        elif elem_type == "ContractGenerator":
+            # Top-level contract definition file. Walk all handlers and the
+            # contracts within, extracting only those that carry
+            # <BlueprintRewards> entries (everything else is mission state
+            # we don't need for the blueprint catalog).
+            in_record = False
+            tag = elem.tag
+            gen_cls = tag.split(".", 1)[1] if "." in tag else ""
+            for handler in elem.findall("generators/*"):
+                handler_cls = handler.tag  # e.g. ContractGeneratorHandler_Career
+                faction_rep_guid = handler.get("factionReputation", "")
+                rep_scope_guid = handler.get("reputationScope", "")
+                locality_guid = ""
+                loc_node = handler.find(
+                    "defaultAvailability/prerequisites/ContractPrerequisite_Locality"
+                )
+                if loc_node is not None:
+                    locality_guid = loc_node.get("localityAvailable", "")
+
+                for contract in handler.findall("contracts/*"):
+                    rewards_nodes = contract.findall(
+                        "contractResults/contractResults/BlueprintRewards"
+                    )
+                    if not rewards_nodes:
+                        continue
+
+                    contract_tag = contract.tag  # CareerContract / Contract
+                    contract_cls = contract.get("debugName", "")
+                    title_key = ""
+                    desc_key = ""
+                    for sp in contract.findall(
+                        "paramOverrides/stringParamOverrides/ContractStringParam"
+                    ):
+                        if sp.get("param") == "Title":
+                            title_key = sp.get("value", "")
+                        elif sp.get("param") == "Description":
+                            desc_key = sp.get("value", "")
+
+                    # Tag-filter from MissionLocation_BP property override
+                    pos_tags, neg_tags = [], []
+                    for mp in contract.findall(
+                        "paramOverrides/propertyOverrides/MissionProperty"
+                    ):
+                        if mp.get("missionVariableName") != "MissionLocation_BP":
+                            continue
+                        for term in mp.findall(
+                            "value/MissionPropertyValue_Location/matchConditions/"
+                            "DataSetMatchCondition_TagSearch/tagSearch/TagSearchTerm"
+                        ):
+                            for ref in term.findall("positiveTags/Reference"):
+                                pos_tags.append(ref.get("value", ""))
+                            for ref in term.findall("negativeTags/Reference"):
+                                neg_tags.append(ref.get("value", ""))
+
+                    bp_rewards = []
+                    for br in rewards_nodes:
+                        results_mask = [
+                            safe_bool(b.get("value", "0"))
+                            for b in br.findall("missionResults/Bool")
+                        ]
+                        bp_rewards.append({
+                            "chance": safe_float(br.get("chance", "1")),
+                            "poolGuid": br.get("blueprintPool", ""),
+                            "missionResultsMask": results_mask,
+                        })
+
+                    contract_rewards.append({
+                        "generatorClassName": gen_cls,
+                        "handlerType": handler_cls,
+                        "handlerDebugName": handler.get("debugName", ""),
+                        "contractType": contract_tag,  # CareerContract / Contract
+                        "id": contract.get("id", ""),
+                        "debugName": contract_cls,
+                        "templateGuid": contract.get("template", ""),
+                        "minStandingGuid": contract.get("minStanding", ""),
+                        "maxStandingGuid": contract.get("maxStanding", ""),
+                        "notForRelease": safe_bool(contract.get("notForRelease", "0")),
+                        "workInProgress": safe_bool(contract.get("workInProgress", "0")),
+                        "titleKey": title_key,
+                        "descriptionKey": desc_key,
+                        "factionReputationGuid": faction_rep_guid,
+                        "reputationScopeGuid": rep_scope_guid,
+                        "localityGuid": locality_guid,
+                        "positiveTagGuids": pos_tags,
+                        "negativeTagGuids": neg_tags,
+                        "blueprintRewards": bp_rewards,
+                    })
+            elem.clear()
+
+        elif elem_type == "MissionType":
+            # Self-closing record at Records/missiontype/**. The class-name
+            # suffix is the canonical type ID (BountyHunter, Collection,
+            # Hauling, …); LocalisedTypeName is the @LOC key.
+            guid = elem.get("__ref", "")
+            tag = elem.tag
+            cls = tag.split(".", 1)[1] if "." in tag else ""
+            if guid:
+                mission_types[guid] = {
+                    "className": cls,
+                    "localisedTypeName": elem.get("LocalisedTypeName", ""),
+                    "svgIconPath": elem.get("svgIconPath", ""),
+                    "iconName": elem.get("IconName", ""),
+                }
+            elem.clear()
+
+        elif elem_type == "ContractTemplate":
+            # Mission-type carrier — contracts reference a template by GUID
+            # (CareerContract@template / Contract@template). The template's
+            # contractDisplayInfo/ContractDisplayInfo@type points at a
+            # MissionType record. Other ContractTemplate fields (display
+            # strings, contractProperties) carry @LOC_UNINITIALIZED on most
+            # records and are not surfaced.
+            in_record = False
+            guid = elem.get("__ref", "")
+            tag = elem.tag
+            cls = tag.split(".", 1)[1] if "." in tag else ""
+            mission_type_guid = ""
+            disp = elem.find("contractDisplayInfo/ContractDisplayInfo")
+            if disp is not None:
+                mission_type_guid = disp.get("type", "")
+            if guid:
+                contract_templates[guid] = {
+                    "className": cls,
+                    "missionTypeGuid": mission_type_guid,
+                }
+            elem.clear()
+
+        elif elem_type == "ScenarioProgress":
+            # Dynamic-event progression (e.g. RoX_ScenarioProgress for
+            # Xenothreat 2). Pools are tier-gated by minPoints, no per-roll
+            # chance — reaching the tier grants the pool.
+            in_record = False
+            tag = elem.tag
+            scen_cls = tag.split(".", 1)[1] if "." in tag else ""
+            for fac_tier in elem.findall(
+                "factionRewardTiers/SScenarioProgressRewardsTiers"
+            ):
+                faction_rep_guid = fac_tier.get("faction", "")
+                for prog in fac_tier.findall("tierProgressions/STierProgressions"):
+                    progression_text = prog.get("progressionText", "")
+                    tiers_out = []
+                    for tier in prog.findall("tierRewards/STierReward"):
+                        pool_guids = [
+                            r.get("value", "")
+                            for r in tier.findall("blueprintPool/Reference")
+                        ]
+                        if not pool_guids:
+                            continue
+                        tiers_out.append({
+                            "minPoints": safe_int(tier.get("minPoints", "0")),
+                            "badgeToAward": tier.get("badgeToAward", "None"),
+                            "poolGuids": pool_guids,
+                        })
+                    if tiers_out:
+                        scenario_rewards.append({
+                            "scenarioClassName": scen_cls,
+                            "factionReputationGuid": faction_rep_guid,
+                            "progressionTextKey": progression_text,
+                            "tiers": tiers_out,
+                        })
+            elem.clear()
+
         elif elem_type == "SIFCSModifiersLegacy":
             # Flight-blade modifier records (FlightBlade_HND/SPD): items
             # reference these via IFCSParams.modifiersLegacy GUID. The
@@ -393,6 +714,15 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
             "parsed_recoil_modifiers.json": recoil_modifiers,
             "parsed_weapon_recoil_configs.json": weapon_recoil_configs,
             "parsed_misfire_defs.json": misfire_defs,
+            "parsed_blueprint_pools.json": blueprint_pools,
+            "parsed_faction_reputation.json": faction_reputation,
+            "parsed_standings.json": standings,
+            "parsed_reputation_scopes.json": reputation_scopes,
+            "parsed_localities.json": localities,
+            "parsed_contract_rewards.json": contract_rewards,
+            "parsed_scenario_rewards.json": scenario_rewards,
+            "parsed_mission_types.json": mission_types,
+            "parsed_contract_templates.json": contract_templates,
         }
         for filename, data in cache_data.items():
             with open(os.path.join(cache_dir, filename), "w", encoding="utf-8") as f:
@@ -402,7 +732,10 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
     return (items_by_class, vehicles_by_class, guid_to_class, manufacturers,
             ammo_params, inventory_containers, gimbal_modifiers, ifcs_modifiers,
             crafting_blueprints, gpp_records, recoil_configs, recoil_modifiers,
-            weapon_recoil_configs, misfire_defs)
+            weapon_recoil_configs, misfire_defs,
+            blueprint_pools, faction_reputation, standings, reputation_scopes,
+            localities, contract_rewards, scenario_rewards,
+            mission_types, contract_templates)
 
 
 def _parse_recoil_modifiers(elem):
@@ -1018,6 +1351,38 @@ def _parse_entity_record(elem, class_name, guid, path):
 
         elif poly_type == "SCItemMissileParams":
             components["missile"] = _parse_missile_params(comp)
+
+        elif poly_type == "SCItemClothingParams":
+            # Character clothing / armor-core stats. Carries environmental
+            # resistance values (temperature, radiation) and the
+            # Flight.gForceResistance bonus (added on PTU 4.8 — values
+            # range −0.5..+1.0 across the catalogue; chest/undersuit items
+            # provide the bulk of the bonus, summed across worn pieces and
+            # capped at 1.0 in-game). Emitted as `components["clothing"]`
+            # with typed float values (matches the other explicit handlers'
+            # convention; replaces the generic SCItemClothingParams fallback).
+            clothing = {}
+            tr = comp.find("TemperatureResistance")
+            if tr is not None:
+                clothing["temperature"] = {
+                    "min": safe_float(tr.get("MinResistance", "0")),
+                    "max": safe_float(tr.get("MaxResistance", "0")),
+                }
+            rr = comp.find("RadiationResistance")
+            if rr is not None:
+                clothing["radiation"] = {
+                    "maxCapacity": safe_float(rr.get("MaximumRadiationCapacity", "0")),
+                    "dissipationRate": safe_float(rr.get("RadiationDissipationRate", "0")),
+                }
+            fl = comp.find("Flight")
+            if fl is not None:
+                # Single attribute today (gForceResistance). Stored as a
+                # block so we can extend without breaking consumers.
+                clothing["flight"] = {
+                    "gForceResistance": safe_float(fl.get("gForceResistance", "0")),
+                }
+            if clothing:
+                components["clothing"] = clothing
 
         elif poly_type == "SEntityPhysicsControllerParams":
             phys = comp.find(".//SEntityRigidPhysicsControllerParams")

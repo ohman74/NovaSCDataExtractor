@@ -9,11 +9,13 @@ modifier/cost references so the UI gets one self-contained crafting
 table.
 
 Each entry:
-- Target item metadata (GUID, ClassName, Name, Type, Size)
+- Target item metadata (GUID, ClassName, Name, Description, Type, Size)
 - Tiered recipe (slots, costs, quality-modifiers, total craft seconds)
 - Modifiers expose the GPP class name (e.g. `GPP_Weapon_FireRate`) so
   consumers don't need a separate gpp lookup.
 - Resource/Item cost GUIDs match the entries in `resources.json`.
+- `RewardSources[]` — references to missions.json entries (ClassName +
+  PoolClassName) that can grant this blueprint, with EffectiveChance.
 """
 
 from typing import Any
@@ -41,6 +43,20 @@ def _resolve_target_name(rec: dict, ctx) -> str:
             if val and not val.startswith("@"):
                 return val
     return rec.get("className", "")
+
+
+def _resolve_target_description(rec: dict, ctx) -> str:
+    """Localized item description, empty when unset or unresolved."""
+    ad = rec.get("attachDef") or {}
+    raw = ad.get("description", "")
+    if not raw:
+        return ""
+    if not raw.startswith("@"):
+        return raw
+    val = ctx.resolve_name(raw)
+    if val and not val.startswith("@"):
+        return val
+    return ""
 
 
 def _resolve_modifier(modifier: dict, ctx) -> dict:
@@ -97,22 +113,31 @@ def _shape_slot(slot: dict, ctx) -> dict:
 
 def build_blueprints(ctx) -> list[dict]:
     """Build the blueprints.json output — all parsed crafting recipes,
-    sorted by target ClassName for stable diffs."""
+    sorted by target ClassName for stable diffs.
+
+    The loop key (`target_guid`) is the *target item's* GUID — crafting
+    blueprints are stored keyed by what they produce, not by the
+    blueprint record itself. The blueprint record's own GUID is read
+    from `bp["blueprintGuid"]` to look up RewardSources, which the
+    reverse index in __main__ keys by blueprint GUID.
+    """
     items_by_guid = {rec["guid"].lower(): cn
                      for cn, rec in ctx.items.items() if rec.get("guid")}
 
     out: list[dict] = []
-    for bp_guid, bp in ctx.crafting_blueprints.items():
-        target_cn = items_by_guid.get(bp_guid.lower(), "")
+    for target_guid, bp in ctx.crafting_blueprints.items():
+        target_cn = items_by_guid.get(target_guid.lower(), "")
         target_rec = ctx.items.get(target_cn) if target_cn else None
         if target_rec:
             ad = target_rec.get("attachDef") or {}
             target_name = _resolve_target_name(target_rec, ctx)
+            target_desc = _resolve_target_description(target_rec, ctx)
             target_type = ad.get("type", "")
             target_subtype = ad.get("subType", "")
             target_size = ad.get("size", 0)
         else:
             target_name = ""
+            target_desc = ""
             target_type = ""
             target_subtype = ""
             target_size = 0
@@ -126,15 +151,23 @@ def build_blueprints(ctx) -> list[dict]:
                 "CraftTimeSeconds": _craft_seconds(tier.get("craftTime", {})),
             })
 
-        out.append({
-            "TargetGUID": bp_guid,
+        bp_record_guid = bp.get("blueprintGuid", "")
+        reward_sources = list(
+            ctx.reward_sources_by_bp_guid.get(bp_record_guid.lower(), [])
+        )
+
+        entry = {
+            "TargetGUID": target_guid,
             "TargetClassName": target_cn,
             "TargetName": target_name,
+            "TargetDescription": target_desc,
             "TargetType": target_type,
             "TargetSubType": target_subtype,
             "TargetSize": target_size,
             "Tiers": tiers_out,
-        })
+            "RewardSources": reward_sources,
+        }
+        out.append(entry)
 
     out.sort(key=lambda e: (e["TargetClassName"], e["TargetGUID"]))
     return out

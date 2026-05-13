@@ -795,6 +795,49 @@ The conversion is idempotent — running the pipeline again after a fresh extrac
 
 ---
 
+## Clothing Block (character armor / undersuits)
+
+Source component: `SCItemClothingParams` on player-equippable Char_Armor / undersuit / helmet items. Emitted as `components["clothing"]` on the parsed record (typed mirror of CIG's raw block).
+
+### Clothing.temperature
+- **Target**: `components.clothing.temperature.{min, max}`
+- **Source**: `SCItemClothingParams/TemperatureResistance@{MinResistance, MaxResistance}`
+- **Parser**: `dataforge_parser` `SCItemClothingParams` branch (in `_parse_entity_record`)
+- **Transformation**: floats in °C — the temperature range at which the item provides full thermal protection.
+
+### Clothing.radiation
+- **Target**: `components.clothing.radiation.{maxCapacity, dissipationRate}`
+- **Source**: `SCItemClothingParams/RadiationResistance@{MaximumRadiationCapacity, RadiationDissipationRate}`
+- **Transformation**: floats — REM capacity and REM/s dissipation rate.
+
+### Clothing.flight.gForceResistance
+- **Target**: `components.clothing.flight.gForceResistance`
+- **Source**: `SCItemClothingParams/Flight@gForceResistance`
+- **Transformation**: float, range observed `[-0.5, +1.0]` on PTU 4.8. The catalogue partitions cleanly: undersuits / Sol-III Core are positive (+0.9 / +0.975 / +1.0); normal armor cores, arms, legs, helmets are zero or negative. New on PTU 4.8 — Live does not emit this field yet.
+
+#### Effective in-game formula
+
+Empirically derived from in-game gauge observations (the consumer is in C++ code, not in DataForge — no record references `gForceResistance` as input):
+
+```
+effective_resist = min(1.0, Σ gForceResistance over all equipped pieces)
+```
+
+Pure additive sum across slots (undersuit + chest core + arms + legs + helmet + backpack), capped at 1.0. **No clamping of individual values to zero** — negative contributions from heavy armor subtract from the total. The display gauge shows `effective_resist × 100%`.
+
+Verified test cases (PTU 4.8):
+
+| Loadout | Σ values | Display |
+|---|---|---|
+| TCS-4 undersuit (+0.9) + normal light core (−0.125) + heavy helmet (−0.125) | 0.65 | 65% |
+| previous + heavy arms (−0.125) + heavy legs (−0.25) | 0.275 | 27.5% |
+| TCS-4 (+0.9) + light core (−0.125) + heavy arms + heavy legs (no helmet) | 0.4 | 40% |
+| Sol-III Core (+0.975) + TCS-4 (+0.9) + heavy helmet + heavy arms + heavy legs | 1.375 → cap 1.0 | 100% |
+
+Sol-III Core (`nvy_flightsuit_light_core_01_0X_01`) is the *only* core-slot item with positive `gForceResistance` in the catalogue (+0.975); every other core piece is negative. Combined with any positive undersuit, Sol-III provides so much headroom (sum ≥ 1.875 with a +0.9 undersuit) that the 1.0 cap absorbs any realistic negative contributions from other slots — which is why the user-visible 100% display persists regardless of helmet/arms/legs choice.
+
+---
+
 ## ShieldEmitter Block
 
 ### ShieldEmitter.FaceType / MaxReallocation / ReconfigurationCooldown / MaxElectricalChargeDamageRate
@@ -1123,6 +1166,125 @@ These are applied as deltas to IFCS fields for items with "_Blade_HND" or "_Blad
 6. **Vehicle Implementation Modifications**: The vehicle-impl XMLs (`Scripts/Entities/Vehicles/Implementations/Xml/*.xml`) carry a per-variant `<Modifications>` block at the root. Each `<Modification name="...">` lists `<Elem idRef="..." name="..." value="..." />` overrides that target Parts by their `id` attribute. The vehicle entity's `VehicleComponentParams@modification` selects which block applies (e.g. RSI Zeus uses `Zeus_CL` / `Zeus_MR` / `Zeus_ST` over a shared `RSI_Zeus.xml`; F7C Mk2 uses `F7C_Mk2` over `ANVL_Hornet_F7A.xml`). `vehicle_impl_parser._apply_inline_modification` walks the parsed port tree and applies each elem (toggling `skipPart`, renaming ports, adjusting size). Without this, variant-only ports (Zeus CL tractor beam, F7C Mk2 Mk2-tag-required ports) wouldn't surface in the output.
 
 7. **Ship-level PortTags Source**: For per-ship `PortTags` in `vehicle_hardpoints.json`, the entity XML's `SItemPortContainerComponentParams@PortTags` is authoritative — captured by the dataforge parser as `components.shipPortTags`. The vehicle-impl XML's `<Vehicle@itemPortTags>` is used only as a fallback, since the base impl's value is stale for variants (e.g. F7C Mk2 uses the F7A impl whose `itemPortTags="Anvil Hornet F7A"` doesn't reflect Mk2's actual tag set).
+
+---
+
+## Blueprints & rewards
+
+`blueprints.json` / `missions.json` / `factions.json` / `standings.json` / `localities.json` / `tags.json` form a normalized graph that links every crafting blueprint to the contracts and dynamic-event tiers that can grant it. `ClassName` is the primary joinkey throughout. GUIDs are exposed as a secondary identifier.
+
+### Source records
+
+| Record `__type` | XML location | Cache file | Parser |
+|---|---|---|---|
+| `BlueprintPoolRecord` | `Records/crafting/blueprintrewards/**` | `parsed_blueprint_pools.json` | `dataforge_parser` `BlueprintPoolRecord` branch |
+| `FactionReputation` | `Records/factions/factionreputation/*.xml` | `parsed_faction_reputation.json` | `dataforge_parser` `FactionReputation` branch |
+| `SReputationStandingParams` | `Records/reputation/standings/<scope>/*.xml` | `parsed_standings.json` | `dataforge_parser` `SReputationStandingParams` branch |
+| `SReputationScopeParams` | `Records/reputation/scopes/*.xml` | `parsed_reputation_scopes.json` | `dataforge_parser` `SReputationScopeParams` branch |
+| `MissionLocality` | `Records/missiondata/pu_missionlocality/**` | `parsed_localities.json` | `dataforge_parser` `MissionLocality` branch |
+| `ContractGenerator` | `Records/contracts/contractgenerator/**` | `parsed_contract_rewards.json` | `dataforge_parser` `ContractGenerator` branch |
+| `ContractTemplate` | `Records/contracts/contracttemplates/*.xml` | `parsed_contract_templates.json` | `dataforge_parser` `ContractTemplate` branch — only the `contractDisplayInfo/ContractDisplayInfo@type` GUID is retained (template → MissionType bridge) |
+| `MissionType` | `Records/missiontype/**/*.xml` | `parsed_mission_types.json` | `dataforge_parser` `MissionType` branch |
+| `ScenarioProgress` | `Records/contracts/contractscenarios/*.xml` | `parsed_scenario_rewards.json` | `dataforge_parser` `ScenarioProgress` branch |
+| Tag tree | `Records/TagDatabase/TagDatabase.TagDatabase.xml` | `parsed_tags.json` | `nova/tag_db_parser.py` (line-based, not ET — file ships with intentionally broken outer XML) |
+
+`Records/crafting/blueprintcategories/blueprintcategorydatabase.xml` exists but its 14 category-GUID references **have no backing record** anywhere in `Records/` — no Category field is emitted as a result.
+
+### `missions.json` fields
+
+| Field | XML path | Notes |
+|---|---|---|
+| `Kind` | always `"Contract"` or `"ScenarioTier"` | discriminator |
+| `ClassName` | `(Career)Contract@debugName` for Kind=Contract; synthetic `<ScenarioClassName>.Tier_<minPoints>` for Kind=ScenarioTier | joinkey to `blueprints.json` `RewardSources[].MissionClassName` |
+| `Id` | `(Career)Contract@id` | Contract only |
+| `Title` | `(Career)Contract/paramOverrides/stringParamOverrides/ContractStringParam[@param="Title"]/@value` → loc | Contract only |
+| `Description` | analog with `param="Description"` | Contract only |
+| `WorkInProgress` / `NotForRelease` | `(Career)Contract@workInProgress`/`@notForRelease` | Contract only — filter test/internal flows |
+| `MissionTypeClassName` | two-hop join: `(Career)Contract@template` → `ContractTemplate/contractDisplayInfo/ContractDisplayInfo@type` → `MissionType.<X>` tag | Contract only — resolves via `mission_types.json`. ScenarioTier entries leave this empty (dynamic events use their own progression model, not MissionType categorization) |
+| `FactionClassName` | follow `ContractGeneratorHandler_*@factionReputation` GUID → `FactionReputation.<X>` tag | resolves via `factions.json` |
+| `StandingMinClassName` / `StandingMaxClassName` | follow `(Career)Contract@minStanding`/`@maxStanding` → `SReputationStandingParams.<X>` | resolves via `standings.json` |
+| `LocalityClassName` | follow `ContractGeneratorHandler_*/defaultAvailability/prerequisites/ContractPrerequisite_Locality@localityAvailable` → `MissionLocality.<X>` | resolves via `localities.json` |
+| `TagFilter.PositiveTags` / `NegativeTags` | `paramOverrides/propertyOverrides/MissionProperty[@missionVariableName="MissionLocation_BP"]/value/MissionPropertyValue_Location/matchConditions/DataSetMatchCondition_TagSearch/tagSearch/TagSearchTerm/{positive,negative}Tags/Reference[*]/@value` | each emits `{GUID, TagName}` — full info via `tags.json` |
+| `BlueprintRewards[].PoolClassName` | follow `BlueprintRewards@blueprintPool` GUID → `BlueprintPoolRecord.<X>` | |
+| `BlueprintRewards[].PoolChance` | `BlueprintRewards@chance` | Contract only — 0.0..1.0 |
+| `BlueprintRewards[].OnMissionResults` | `BlueprintRewards/missionResults/Bool[*]/@value` → enum-mapping (`["Success","FailedTimeout","FailedDeath","Aborted","Failed"]` by index, mapped at `nova/__main__._MISSION_RESULT_NAMES`) | |
+| `BlueprintRewards[].TargetClassNames` | for each `BlueprintReward` in the pool, look up the target item ClassName via `bp_guid → target_guid → item ClassName` | used for reverse "what does this mission give?" lookup |
+| `ScenarioClassName` | tag-suffix of `ScenarioProgress.<X>` | ScenarioTier only |
+| `MinPoints` | `STierReward@minPoints` | ScenarioTier only — points threshold |
+| `BadgeToAward` | `STierReward@badgeToAward` | ScenarioTier only |
+
+### `blueprints.json` additions
+
+| Field | Source |
+|---|---|
+| `TargetDescription` | `EntityClassDefinition/Components/SItemDefinition/Localization@Description` (parsed into `attachDef.description`) |
+| `RewardSources[]` | reverse index built in `nova/__main__._build_reward_sources_index` from `parsed_contract_rewards.json` and `parsed_scenario_rewards.json`. Keyed by the *blueprint record's* GUID (`bp["blueprintGuid"]`, added by the parser at line ~297). Each entry is one of:<br>**Contract:** `{Kind, MissionClassName, PoolClassName, EffectiveChance, OnMissionResults}`<br>**ScenarioTier:** `{Kind, MissionClassName, PoolClassName, MinPoints}` |
+
+`EffectiveChance = PoolChance × (weight_in_pool / sum_weights_in_pool)`. Multiple reward sources for the same blueprint each appear as a separate entry; consumers can sum or take the max as appropriate.
+
+### `factions.json` fields
+
+Source record: `FactionReputation` at `Records/factions/factionreputation/factionreputation_*.xml`.
+
+| Field | XML attribute / path |
+|---|---|
+| `ClassName` | tag-suffix of `FactionReputation.<X>` |
+| `GUID` | `@__ref` |
+| `DisplayName` | `@displayName` → loc |
+| `Logo` | `@logo` (UI asset path) |
+| `IsNPC` | `@isNPC` |
+| `Lawful` | `True` iff ClassName contains `_Lawful_` (CIG encodes lawfulness in the name, not as a separate attribute on this record type) |
+| `Description` / `Headquarters` / `Founded` / `Leadership` / `Area` / `Focus` | `propertiesBB/SReputationContextBBPropertyParams[@name=entity<Field>]/dynamicProperty/SBBDynamicPropertyLocString@value` → loc |
+
+`Records/factions/faction_*.xml` (type `Faction`) and `Records/factions_legacy/*.xml` (type `Faction_LEGACY`) are **not parsed** — they describe AI combat factions and legacy stub records respectively, not the reputation-system entities referenced by contracts.
+
+### `standings.json` fields
+
+Source: `SReputationStandingParams` at `Records/reputation/standings/<scope>/reputationstanding_*_rank<N>.xml`.
+
+| Field | XML attribute |
+|---|---|
+| `ClassName` | tag-suffix |
+| `GUID` | `@__ref` |
+| `Name` | `@name` (debug-style, e.g. `FactionRep_Neutral_Rank0`) |
+| `DisplayName` | `@displayName` → loc |
+| `MinReputation` | `@minReputation` |
+| `Gated` | `@gated` |
+| `ScopeClassName` | derived from `SReputationScopeParams`: scope's `standingMap/standings/Reference[*]/@value` is scanned for each standing GUID; the first scope to claim it wins |
+
+### `localities.json` fields
+
+Source: `MissionLocality` at `Records/missiondata/pu_missionlocality/**`.
+
+| Field | XML |
+|---|---|
+| `ClassName` | tag-suffix (e.g. `Nyx`, `Pyro`, `Pyro_RegionA`) — **CIG does NOT @LOC localize region names**; the class-name suffix is the official label |
+| `GUID` | `@__ref` |
+| `AvailableLocations` | `availableLocations/Reference[*]/@value` — opaque location GUIDs |
+
+### `mission_types.json` fields
+
+Source: `MissionType` records at `Records/missiontype/**/*.xml` (self-closing single-line records).
+
+| Field | XML attribute |
+|---|---|
+| `ClassName` | tag-suffix (e.g. `BountyHunter`, `Collection`, `Hauling`, `Mining`) |
+| `GUID` | `@__ref` |
+| `DisplayName` | `@LocalisedTypeName` → loc (e.g. `@mobiglas_ui_BountyHunter` → "Bounty Hunter") |
+| `IconPath` | `@svgIconPath` (UI asset path) — optional |
+| `IconName` | `@IconName` (legacy bitmap name) — optional |
+
+### `tags.json` shape
+
+Object map keyed by tag GUID (TagName is NOT unique — same name can appear in multiple tree positions, e.g. `Pyro1` exists 4× across System / Station / LagrangePoints / AISpawn).
+
+```json
+{
+  "<guid>": {"TagName": "...", "Path": "Top > Mid > Leaf", "Description": "..."}
+}
+```
+
+Parsed by `nova/tag_db_parser.py` via line-based indent-stack traversal because the source file's outer XML is intentionally malformed (CIG ships it with `</TagDatabase.TagDatabase></Record>` on one line with no matching opening `<Record>`). ET.parse fails on it; the line-based parser is robust to this. `Path` is the ` > `-joined ancestor chain for human-readable disambiguation. `Description` is **plain English text** when present (not an `@LOC` key) — this is one of the few exceptions to the project's loc-everywhere rule.
 
 ---
 

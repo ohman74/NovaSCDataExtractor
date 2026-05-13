@@ -99,7 +99,7 @@ nova/
 
 ## Output files
 
-Five JSON files in `output/<channel>/`, matching the documented reference shapes:
+Thirteen JSON files in `output/<channel>/`, matching the documented reference shapes:
 
 | File | Reference | Content |
 |------|-----------|---------|
@@ -108,8 +108,23 @@ Five JSON files in `output/<channel>/`, matching the documented reference shapes
 | `vehicle_hardpoints.json` | entry_2 | PortTags (from `SItemPortContainerComponentParams.PortTags`), Hull.Structure, Hardpoints with per-port `RequiredTags`, FlightReady |
 | `vehicle_equipment.json` | entry_3 | Ship/vehicle equipment stdItem records (~2868 items on current Live) |
 | `fps_equipment.json` | entry_4 | FPS weapons + attachments stdItem records (~496 items on current Live, includes cosmetic skin variants tagged inline) |
+| `resources.json` | — | Crafting resources keyed by GUID, referenced from `blueprints.json` slot `Costs[]` |
+| `blueprints.json` | — | All ~1500 crafting recipes per target item, with `RewardSources[]` linking to `missions.json` |
+| `missions.json` | — | Contracts (and synthetic scenario-tier entries) that grant blueprints. References factions/standings/localities/tags by ClassName |
+| `factions.json` | — | FactionReputation catalog with localized DisplayName + HQ/Leadership/Area/Focus metadata |
+| `standings.json` | — | Reputation rank steps (Neutral/Friendly/Elite Contractor/…) with `MinReputation` thresholds |
+| `localities.json` | — | Region/sub-region records (Nyx, Pyro, Pyro_RegionA, …) |
+| `tags.json` | — | TagDatabase catalog (GUID-keyed object map). Used by `missions.json` `TagFilter` blocks |
+| `mission_types.json` | — | MissionType catalog (BountyHunter, Collection, Hauling, Mining, …). Referenced from `missions.json` by `MissionTypeClassName` |
 
 Plus `metadata.json` with `gameVersion` (public patch format `<patch>.<p4_changelist>` like `4.7.2.11715810` derived from the RSI launcher log; falls back to the build-manifest `Branch` when the log isn't available), `buildBranch`, `buildVersion`, `p4Change`, `buildDate`, `channel`, and per-dataset counts.
+
+### Blueprint → mission drop graph
+
+Files `blueprints.json` / `missions.json` / `factions.json` / `standings.json` / `localities.json` / `tags.json` form a normalized reference graph; `ClassName` is the joinkey throughout (GUIDs are exposed but secondary). Two reward mechanisms are surfaced uniformly through `missions.json`:
+
+- **Contract** — `<BlueprintRewards chance="X" blueprintPool="…"><missionResults>…</missionResults></BlueprintRewards>` on a `(Career)Contract`. `RewardSources[].EffectiveChance = chance × (weight_in_pool / sum_weights)`.
+- **ScenarioTier** — `STierReward minPoints="X"` on a `ScenarioProgress` (currently only `RoX_ScenarioProgress` / Xenothreat 2). No chance — tier-gated by points. `ClassName` is synthetic: `<ScenarioClassName>.Tier_<minPoints>`.
 
 ## Output format
 
