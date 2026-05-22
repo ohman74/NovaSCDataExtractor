@@ -29,6 +29,106 @@ import xml.etree.ElementTree as ET
 from .utils import safe_float, safe_int, safe_bool
 
 
+def _extract_prereqs(root):
+    """Walk a `<prerequisites>` or `<additionalPrerequisites>` element and
+    project each ContractPrerequisite_* child into a typed dict.
+
+    The five observed kinds (PTU 4.8) — every one matters as a gate:
+      - Locality           localityAvailable GUID (region/sub-region scope)
+      - Location           locationAvailable GUID (specific location entity)
+      - LocationProperty   refers to a MissionProperty by name + level
+      - Reputation         faction + scope + min/max standing range
+      - CompletedContractTags  required completion-tag references + counts
+      - CrimeStat          min/max crime stat range
+
+    The caller can pass either a `<prerequisites>` (under
+    `defaultAvailability`) or a `<additionalPrerequisites>` (under a contract
+    or property override) — both share the same child schema. Returns a
+    dict-of-lists shape so it can be merged across handler/contract layers
+    without losing the per-kind boundaries.
+    """
+    out = {
+        "localityGuids": [],
+        "locationGuids": [],
+        "locationProperties": [],
+        "reputations": [],
+        "completedContractTags": [],
+        "crimeStats": [],
+    }
+    if root is None:
+        return out
+    for child in root:
+        tag = child.tag
+        if tag == "ContractPrerequisite_Locality":
+            g = child.get("localityAvailable", "")
+            if g:
+                out["localityGuids"].append(g)
+        elif tag == "ContractPrerequisite_Location":
+            g = child.get("locationAvailable", "")
+            if g:
+                out["locationGuids"].append(g)
+        elif tag == "ContractPrerequisite_LocationProperty":
+            out["locationProperties"].append({
+                "propertyVariableName": child.get("propertyVariableName", ""),
+                "propertyExtendedTextToken": child.get(
+                    "propertyExtendedTextToken", ""
+                ),
+                "locationLevelType": child.get("locationLevelType", ""),
+            })
+        elif tag == "ContractPrerequisite_Reputation":
+            out["reputations"].append({
+                "factionReputationGuid": child.get("factionReputation", ""),
+                "scopeGuid": child.get("scope", ""),
+                "minStandingGuid": child.get("minStanding", ""),
+                "maxStandingGuid": child.get("maxStanding", ""),
+                "exclude": safe_bool(child.get("exclude", "0")),
+                "includeWhenSharing": safe_bool(
+                    child.get("includePrerequisiteWhenSharing", "0")
+                ),
+            })
+        elif tag == "ContractPrerequisite_CompletedContractTags":
+            tag_guids = [
+                r.get("value", "")
+                for r in child.findall("requiredCompletedContractTags/tags/Reference")
+            ]
+            out["completedContractTags"].append({
+                "tagGuids": tag_guids,
+                "requiredCount": safe_int(child.get("requiredCountValue", "0")),
+                "excludedCount": safe_int(child.get("excludedCountValue", "0")),
+                "includeWhenSharing": safe_bool(
+                    child.get("includePrerequisiteWhenSharing", "0")
+                ),
+            })
+        elif tag == "ContractPrerequisite_CrimeStat":
+            out["crimeStats"].append({
+                "minCrimeStat": safe_int(child.get("minCrimeStat", "0")),
+                "maxCrimeStat": safe_int(child.get("maxCrimeStat", "0")),
+                "includeWhenSharing": safe_bool(
+                    child.get("includePrerequisiteWhenSharing", "0")
+                ),
+            })
+    return out
+
+
+def _merge_prereqs(*sources):
+    """Concatenate per-kind lists from multiple prereq buckets in order.
+    Handler-level prereqs first, then contract-level additional prereqs."""
+    merged = {
+        "localityGuids": [],
+        "locationGuids": [],
+        "locationProperties": [],
+        "reputations": [],
+        "completedContractTags": [],
+        "crimeStats": [],
+    }
+    for src in sources:
+        if not src:
+            continue
+        for key in merged:
+            merged[key].extend(src.get(key, []))
+    return merged
+
+
 def stream_parse_dataforge(xml_path, cache_dir=None):
     """Parse the Game2.xml DataForge file using streaming.
 
@@ -61,6 +161,7 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
             "scenario_rewards": os.path.join(cache_dir, "parsed_scenario_rewards.json"),
             "mission_types": os.path.join(cache_dir, "parsed_mission_types.json"),
             "contract_templates": os.path.join(cache_dir, "parsed_contract_templates.json"),
+            "mission_scenarios": os.path.join(cache_dir, "parsed_mission_scenarios.json"),
         }
 
         if all(os.path.isfile(f) for f in cache_files.values()):
@@ -86,7 +187,8 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
                   f"{len(data['contract_rewards'])} contract rewards, "
                   f"{len(data['scenario_rewards'])} scenario rewards, "
                   f"{len(data['mission_types'])} mission types, "
-                  f"{len(data['contract_templates'])} contract templates")
+                  f"{len(data['contract_templates'])} contract templates, "
+                  f"{len(data['mission_scenarios'])} mission scenarios")
             return (data["items"], data["vehicles"], data["guids"],
                     data["manufacturers"], data["ammo"], data["inventory"],
                     data["gimbal_modifiers"], data["ifcs_modifiers"],
@@ -97,7 +199,8 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
                     data["standings"], data["reputation_scopes"],
                     data["localities"], data["contract_rewards"],
                     data["scenario_rewards"],
-                    data["mission_types"], data["contract_templates"])
+                    data["mission_types"], data["contract_templates"],
+                    data["mission_scenarios"])
 
     print(f"  Parsing {xml_path}...")
     size_mb = os.path.getsize(xml_path) / (1024 * 1024)
@@ -130,6 +233,12 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
     scenario_rewards = []       # flat list — see _parse_scenario_progress
     mission_types = {}          # guid -> {className, localisedTypeName, svgIconPath, iconName}
     contract_templates = {}     # guid -> {className, missionTypeGuid}
+    # MissionScenario records keyed by GUID. ContractGeneratorHandler_*
+    # references these via <required_active_scenarios><Reference/>; when the
+    # scenario's <MissionScenarioSchedule enabled="0" /> ships disabled, the
+    # contract handler is content-blocked and its contracts never spawn.
+    mission_scenarios = {}      # guid -> {className, name, description,
+                                #          autoCreate, trackProgress, scheduleEnabled}
 
     start = time.time()
     entity_count = 0
@@ -157,7 +266,8 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
                               "SReputationStandingParams", "SReputationScopeParams",
                               "MissionLocality", "ContractGenerator",
                               "ScenarioProgress",
-                              "MissionType", "ContractTemplate"):
+                              "MissionType", "ContractTemplate",
+                              "MissionScenario"):
                 in_record = True
             continue
 
@@ -501,12 +611,27 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
                 handler_cls = handler.tag  # e.g. ContractGeneratorHandler_Career
                 faction_rep_guid = handler.get("factionReputation", "")
                 rep_scope_guid = handler.get("reputationScope", "")
-                locality_guid = ""
-                loc_node = handler.find(
-                    "defaultAvailability/prerequisites/ContractPrerequisite_Locality"
+                # Content-blocker / dynamic-event gate. Handler only spawns
+                # contracts when ALL referenced MissionScenario records are
+                # active. ContentBlocker_Scenario is the most common entry —
+                # a kill-switch CIG ships with enabled="0" to keep unreleased
+                # content out of the build until flipped on.
+                required_scenario_guids = [
+                    r.get("value", "")
+                    for r in handler.findall(
+                        "required_active_scenarios/Reference"
+                    )
+                ]
+                handler_prereqs = _extract_prereqs(
+                    handler.find("defaultAvailability/prerequisites")
                 )
-                if loc_node is not None:
-                    locality_guid = loc_node.get("localityAvailable", "")
+                # Legacy single-locality slot kept for backwards compat with
+                # missions.json' `LocalityClassName` field. Pick the first
+                # handler-level locality GUID, if any.
+                locality_guid = (
+                    handler_prereqs["localityGuids"][0]
+                    if handler_prereqs["localityGuids"] else ""
+                )
 
                 for contract in handler.findall("contracts/*"):
                     rewards_nodes = contract.findall(
@@ -543,6 +668,17 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
                             for ref in term.findall("negativeTags/Reference"):
                                 neg_tags.append(ref.get("value", ""))
 
+                    # Contract-level additionalPrerequisites — direct children
+                    # of the contract element only (the deeply nested
+                    # location-conditional `additionalPrerequisites` inside
+                    # propertyOverrides apply only when a location property
+                    # resolves to a specific value and are out of scope for
+                    # the top-level availability gate).
+                    contract_prereqs = _extract_prereqs(
+                        contract.find("additionalPrerequisites")
+                    )
+                    prereqs = _merge_prereqs(handler_prereqs, contract_prereqs)
+
                     bp_rewards = []
                     for br in rewards_nodes:
                         results_mask = [
@@ -574,6 +710,13 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
                         "localityGuid": locality_guid,
                         "positiveTagGuids": pos_tags,
                         "negativeTagGuids": neg_tags,
+                        "requiredActiveScenarioGuids": required_scenario_guids,
+                        "prereqLocalityGuids": prereqs["localityGuids"],
+                        "prereqLocationGuids": prereqs["locationGuids"],
+                        "prereqLocationProperties": prereqs["locationProperties"],
+                        "prereqReputations": prereqs["reputations"],
+                        "prereqCompletedContractTags": prereqs["completedContractTags"],
+                        "prereqCrimeStats": prereqs["crimeStats"],
                         "blueprintRewards": bp_rewards,
                     })
             elem.clear()
@@ -651,6 +794,35 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
                         })
             elem.clear()
 
+        elif elem_type == "MissionScenario":
+            # Build-gate / dynamic-event scenario. ContractGeneratorHandler_*
+            # references these via <required_active_scenarios> — the handler
+            # only spawns contracts when every referenced scenario is active.
+            # The schedule's `enabled` flag is the on/off switch CIG ships;
+            # ContentBlocker_Scenario in particular ships with enabled="0"
+            # to keep unreleased contract families out of the live build.
+            in_record = False
+            guid = elem.get("__ref", "")
+            tag = elem.tag
+            cls = tag.split(".", 1)[1] if "." in tag else ""
+            schedule_enabled = True
+            sched_node = elem.find("schedule/MissionScenarioSchedule")
+            if sched_node is not None:
+                # `enabled` defaults to 1 when absent — only treat the
+                # attribute as authoritative when present, matches CIG's
+                # implicit "scheduled if not otherwise stated" behavior.
+                schedule_enabled = safe_bool(sched_node.get("enabled", "1"))
+            if guid:
+                mission_scenarios[guid] = {
+                    "className": cls,
+                    "name": elem.get("name", ""),
+                    "description": elem.get("description", ""),
+                    "autoCreate": safe_bool(elem.get("auto_create", "0")),
+                    "trackProgress": safe_bool(elem.get("track_progress", "0")),
+                    "scheduleEnabled": schedule_enabled,
+                }
+            elem.clear()
+
         elif elem_type == "SIFCSModifiersLegacy":
             # Flight-blade modifier records (FlightBlade_HND/SPD): items
             # reference these via IFCSParams.modifiersLegacy GUID. The
@@ -723,6 +895,7 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
             "parsed_scenario_rewards.json": scenario_rewards,
             "parsed_mission_types.json": mission_types,
             "parsed_contract_templates.json": contract_templates,
+            "parsed_mission_scenarios.json": mission_scenarios,
         }
         for filename, data in cache_data.items():
             with open(os.path.join(cache_dir, filename), "w", encoding="utf-8") as f:
@@ -735,7 +908,7 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
             weapon_recoil_configs, misfire_defs,
             blueprint_pools, faction_reputation, standings, reputation_scopes,
             localities, contract_rewards, scenario_rewards,
-            mission_types, contract_templates)
+            mission_types, contract_templates, mission_scenarios)
 
 
 def _parse_recoil_modifiers(elem):

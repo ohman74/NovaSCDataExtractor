@@ -47,6 +47,7 @@ from .builders.standings import build_standings
 from .builders.localities import build_localities
 from .builders.tags import build_tags
 from .builders.mission_types import build_mission_types
+from .builders.scenarios import build_scenarios
 
 
 class BuildContext:
@@ -64,7 +65,8 @@ class BuildContext:
                  blueprint_pools=None, faction_reputation=None,
                  standings=None, reputation_scopes=None, localities=None,
                  contract_rewards=None, scenario_rewards=None, tags=None,
-                 mission_types=None, contract_templates=None):
+                 mission_types=None, contract_templates=None,
+                 mission_scenarios=None):
         self.items = items_by_class
         self.vehicles = vehicles_by_class
         self.guids = guid_to_class
@@ -148,6 +150,12 @@ class BuildContext:
         self.mission_types = mission_types or {}
         # ContractTemplate records by GUID — {className, missionTypeGuid}.
         self.contract_templates = contract_templates or {}
+        # MissionScenario records by GUID. Referenced from
+        # ContractGeneratorHandler_*/required_active_scenarios — when a
+        # handler's required scenarios aren't all active (e.g. CIG ships
+        # ContentBlocker_Scenario with scheduleEnabled=False), the contracts
+        # never spawn live regardless of player prerequisites.
+        self.mission_scenarios = mission_scenarios or {}
         # Reverse index built downstream in __main__: bp_guid → [{Kind, …}].
         self.reward_sources_by_bp_guid = {}
 
@@ -228,6 +236,7 @@ BUILDERS = {
     "localities":         ("localities.json",         build_localities,         False),
     "tags":               ("tags.json",               build_tags,               False),
     "mission_types":      ("mission_types.json",      build_mission_types,      False),
+    "scenarios":          ("scenarios.json",          build_scenarios,          False),
 }
 
 
@@ -564,7 +573,7 @@ def run_extraction(config, args):
      weapon_recoil_configs, misfire_defs,
      blueprint_pools, faction_reputation, standings, reputation_scopes,
      localities, contract_rewards, scenario_rewards,
-     mission_types, contract_templates) = \
+     mission_types, contract_templates, mission_scenarios) = \
         stream_parse_dataforge(xml_path, config.cache_dir)
 
     print("\n[PARSE] Parsing TagDatabase...")
@@ -734,7 +743,8 @@ def run_extraction(config, args):
                        scenario_rewards=scenario_rewards,
                        tags=tags,
                        mission_types=mission_types,
-                       contract_templates=contract_templates)
+                       contract_templates=contract_templates,
+                       mission_scenarios=mission_scenarios)
     ctx.matrix = matrix_data
     ctx.cache_dir = config.cache_dir
 
