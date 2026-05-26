@@ -307,6 +307,19 @@ def _build_recoil_block(components, ctx):
     return {"Setups": setups_out} if setups_out else None
 
 
+def _resolve_loc(key, ctx):
+    """Resolve an @-localization key to its display string, keeping the raw
+    key when it isn't a @-ref or has no translation. Mirrors the resolution
+    blueprints.py applies so the embedded Crafting block and the standalone
+    blueprints.json catalog show identical, human-readable slot/property names.
+    """
+    if key and key.startswith("@"):
+        val = ctx.resolve_name(key)
+        if val and not val.startswith("@"):
+            return val
+    return key
+
+
 def _build_crafting_block(record, ctx):
     """Build the Crafting block from a blueprint indexed by item GUID.
 
@@ -347,7 +360,7 @@ def _build_crafting_block(record, ctx):
                 # accordingly by the parser.
                 mods_out.append({
                     "Property": gpp.get("className", ""),
-                    "PropertyName": gpp.get("propertyName", ""),
+                    "PropertyName": _resolve_loc(gpp.get("propertyName", ""), ctx),
                     "UnitFormat": gpp.get("unitFormat", ""),
                     "Kind": mod.get("kind", "multiplier"),
                     "ModifierAtStart": mod.get("modifierAtStart", 1.0),
@@ -364,7 +377,7 @@ def _build_crafting_block(record, ctx):
                 })
             slots_out.append({
                 "Name": slot.get("name", ""),
-                "DisplayName": slot.get("displayName", ""),
+                "DisplayName": _resolve_loc(slot.get("displayName", ""), ctx),
                 "Modifiers": mods_out,
                 "Costs": costs_out,
             })
