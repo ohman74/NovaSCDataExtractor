@@ -216,6 +216,8 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
     gimbal_modifiers = {}  # guid -> {fireRateMultiplier: float}
     ifcs_modifiers = {}  # guid -> {numbers: [...], vectors: [...]} from SIFCSModifiersLegacy
     crafting_blueprints = {}  # target-entity-guid -> {tiers: [{craftTime, slots: [...]}]}
+    raw_crafting_blueprints = []  # all parsed blueprints; target GUIDs resolved post-loop
+                                  # (see _resolve_crafting_targets) once items_by_class is complete
     gpp_records = {}  # gpp-guid -> {propertyName, unitFormat, className}
     recoil_configs = {}  # config-guid -> {setups: [{filterByAimStanceState, modifiersGuid}, ...]}
     recoil_modifiers = {}  # modifiers-guid -> {hands: {...}, aim: {...}, body: {...}, head: {...}}
@@ -407,16 +409,16 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
             guid = elem.get("__ref", "")
             bp = _parse_crafting_blueprint(elem)
             if bp:
-                # Index by target entity GUID — multiple blueprints could target
-                # the same item (variants), keep the first encountered. The
-                # blueprint record's own GUID is preserved as bp["blueprintGuid"]
-                # so downstream code can join pool references (which point at
-                # the *blueprint* GUID, not the target item GUID) back to the
-                # target.
-                target = bp.pop("targetGuid", "")
-                if target and target not in crafting_blueprints:
-                    bp["blueprintGuid"] = guid
-                    crafting_blueprints[target] = bp
+                # Collect every blueprint now; the target item GUID is resolved
+                # after the parse completes (see _resolve_crafting_targets),
+                # because detecting CIG's shared-entityClass copy-paste defect
+                # needs the full set, and the className fallback needs the
+                # fully-populated items_by_class. The blueprint record's own
+                # GUID is preserved as bp["blueprintGuid"] so downstream code
+                # can join pool references (which point at the *blueprint* GUID,
+                # not the target item GUID) back to the target.
+                bp["blueprintGuid"] = guid
+                raw_crafting_blueprints.append(bp)
             elem.clear()
 
         elif elem_type == "CraftingGameplayPropertyDef":
@@ -867,6 +869,12 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
     _resolve_external_loadouts(items_by_class, cache_root)
     _resolve_external_loadouts(vehicles_by_class, cache_root)
 
+    # Key crafting blueprints by the GUID of the item they produce, repairing
+    # CIG's shared-entityClass copy-paste defect along the way. Must run after
+    # the parse loop so items_by_class is complete for className resolution.
+    crafting_blueprints = _resolve_crafting_targets(raw_crafting_blueprints,
+                                                    items_by_class)
+
     # Cache results
     if cache_dir:
         os.makedirs(cache_dir, exist_ok=True)
@@ -1159,7 +1167,12 @@ def _parse_weapon_recoil_config(elem):
 
 
 def _parse_crafting_blueprint(elem):
-    """Parse a CraftingBlueprintRecord into {targetGuid, tiers: [...]}.
+    """Parse a CraftingBlueprintRecord into
+    {targetGuid, blueprintClassName, tiers: [...]}.
+
+    `blueprintClassName` is the record's own class (the element-tag suffix,
+    e.g. `BP_CRAFT_COOL_TYDT_S02_IceBox_SCItem`); _resolve_crafting_targets
+    uses it as a fallback when the entityClass GUID is unreliable.
 
     Returns None for non-creation blueprints (dismantle, salvage, etc.) and
     blueprints without a target entityClass.
@@ -1170,6 +1183,8 @@ def _parse_crafting_blueprint(elem):
     target_guid = proc.get("entityClass", "")
     if not target_guid:
         return None
+    tag = elem.tag
+    blueprint_class = tag.split(".", 1)[1] if "." in tag else ""
 
     tiers = []
     for tier in elem.findall(".//tiers/CraftingBlueprintTier"):
@@ -1194,7 +1209,61 @@ def _parse_crafting_blueprint(elem):
 
     if not tiers:
         return None
-    return {"targetGuid": target_guid, "tiers": tiers}
+    return {"targetGuid": target_guid,
+            "blueprintClassName": blueprint_class,
+            "tiers": tiers}
+
+
+def _resolve_crafting_targets(raw_blueprints, items_by_class):
+    """Key parsed creation-blueprints by the GUID of the item they produce.
+
+    The producing item is normally CraftingProcess_Creation.entityClass (a
+    GUID). But CIG's data carries a copy-paste defect: several distinct
+    blueprints sometimes share ONE entityClass GUID — e.g.
+    BP_CRAFT_COOL_TYDT_S02_IceBox, _HeatSink and _NightFall all carry
+    Cryo-Star SL's GUID. When N>=2 blueprints point at the same GUID, that
+    GUID cannot be the true target for all of them.
+
+    LAST-RESORT className fallback, gated on a collision (positive evidence the
+    structural GUID is wrong): CIG names every recipe
+    `BP_CRAFT_<targetItemClassName>` — verified to agree with entityClass for
+    1526/1560 (97.8%) of the corpus. For colliding blueprints only, strip the
+    `BP_CRAFT_` prefix and, if the result is a real item className whose GUID
+    differs from the shared one, re-key to it. Non-colliding blueprints always
+    keep their entityClass GUID — this never blanket-overrides the structural
+    field. Removable once CIG stops duplicating entityClass values.
+    """
+    from collections import Counter
+
+    class_to_guid = {cn.lower(): rec["guid"]
+                     for cn, rec in items_by_class.items() if rec.get("guid")}
+
+    # How many distinct blueprints claim each entityClass GUID as their target.
+    target_counts = Counter(bp["targetGuid"].lower()
+                            for bp in raw_blueprints if bp.get("targetGuid"))
+
+    result = {}
+    remapped = []
+    for bp in raw_blueprints:
+        target = bp.pop("targetGuid", "")
+        bp_class = bp.pop("blueprintClassName", "")
+        if not target:
+            continue
+        # Only second-guess the GUID when it collides with another blueprint.
+        if target_counts[target.lower()] >= 2 and bp_class[:9].upper() == "BP_CRAFT_":
+            derived = bp_class[9:]  # strip "BP_CRAFT_" -> intended item className
+            derived_guid = class_to_guid.get(derived.lower(), "")
+            if derived_guid and derived_guid.lower() != target.lower():
+                remapped.append((bp_class, target, derived_guid))
+                target = derived_guid
+        # First-seen wins on any remaining tie (matches prior behaviour).
+        if target not in result:
+            result[target] = bp
+
+    if remapped:
+        print(f"  Crafting: re-keyed {len(remapped)} blueprint(s) off shared "
+              f"entityClass GUIDs (CIG copy-paste defect) via BP_CRAFT_ className")
+    return result
 
 
 def _parse_blueprint_slot(slot_elem):
