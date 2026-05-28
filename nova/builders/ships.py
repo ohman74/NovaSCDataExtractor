@@ -4213,15 +4213,25 @@ def _compute_mass(loadout_entries, ctx):
 
 
 def _resolve_entry(entry, ctx):
-    """Resolve a loadout entry to (className, itemRecord)."""
+    """Resolve a loadout entry to (className, itemRecord).
+
+    When both fields are present and disagree, trust the GUID — the engine
+    instantiates via entityClassReference, and CIG ships stale className
+    strings (e.g. Firebird/Gladius wing/nose ports name the inner weapon
+    while the GUID points to the gimbal mount that actually hosts it).
+    """
     entity_class = entry.get("entityClassName", "")
     entity_ref = entry.get("entityClassReference", "")
 
+    if entity_ref:
+        resolved = ctx.resolve_guid(entity_ref)
+        if resolved:
+            return resolved, ctx.get_item(resolved)
+        if entity_class:
+            return entity_class, ctx.get_item(entity_class)
+        return entity_ref, None
     if entity_class:
         return entity_class, ctx.get_item(entity_class)
-    elif entity_ref:
-        resolved = ctx.resolve_guid(entity_ref) or entity_ref
-        return resolved, ctx.get_item(resolved)
     return "", None
 
 
