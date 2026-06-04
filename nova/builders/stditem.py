@@ -1661,14 +1661,25 @@ def _build_weapon_data(components, ctx, item_type="", is_fps=False):
             # FPS burst-inner sequences also add:
             #   (shotCount-1)*60/inner  (burst duration, between first and last shot)
             #   + innerCooldownTime     (post-burst recovery)
+            # Burst RPM = fastest instantaneous rate anywhere in the cycle
+            # (so consumers can compute burst DPS without the inter-burst pause).
+            # Only meaningful for true burst sequences (Sequence wrapper with
+            # mode="Looping"). Sequence wrappers with mode="Automatically" are
+            # single-shot weapons whose entries describe internal barrel cycling,
+            # not a burst pattern (Leonids Cannon) — burst_rpm stays = rpm there
+            # so we don't emit BurstRoundsPerMinute below.
+            burst_rpm = rpm
+            seq_mode = mode.get("sequenceMode", "")
             if fire_type == "sequence" and rpm > 0:
                 seq_entries = mode.get("sequenceEntries") or []
                 if seq_entries:
                     shots_per_entry = max(mode.get("shotCount", 0) or 1, 1)
+                    inner_fire_rate = rpm   # capture before we overwrite below
                     inner_interval = 60.0 / rpm
                     inner_cd = mode.get("innerCooldownTime", 0) or 0
                     total_cycle = 0.0
                     total_shots = 0
+                    max_entry_rate = 0.0
                     has_mixed_units = len(set(e.get("unit", "") for e in seq_entries)) > 1
                     has_seconds = any(e.get("unit") == "Seconds" for e in seq_entries)
                     for e in seq_entries:
@@ -1686,6 +1697,19 @@ def _build_weapon_data(components, ctx, item_type="", is_fps=False):
                             entry_time = inner_interval
                         total_cycle += entry_time * reps
                         total_shots += shots_per_entry * reps
+                        # Per-entry peak rate. When the mode fires multiple shots
+                        # per entry (shotCount > 1), those shots cadence at the
+                        # inner fireRate inside the entry — so the entry's burst
+                        # rate is the inner rate, not 60/entry_time (which only
+                        # describes how fast the entry itself recycles).
+                        if shots_per_entry > 1:
+                            entry_rate = inner_fire_rate
+                        elif entry_time > 0:
+                            entry_rate = 60.0 / entry_time
+                        else:
+                            entry_rate = 0.0
+                        if entry_rate > max_entry_rate:
+                            max_entry_rate = entry_rate
                     # FPS burst-inner sequences: add burst duration + inner cooldown
                     # (shotCount-1 intervals at inner rate, plus post-burst cooldown).
                     if is_fps and shots_per_entry > 1:
@@ -1696,9 +1720,23 @@ def _build_weapon_data(components, ctx, item_type="", is_fps=False):
                         rpm_units = [e for e in seq_entries if e.get("unit") == "RPM"]
                         uniform_rpm = (len(rpm_units) == len(seq_entries)
                                        and len(set(e.get("delay") for e in rpm_units)) == 1)
-                        if not is_fps and uniform_rpm and effective_rpm > rpm:
+                        capped_uniform = (not is_fps and uniform_rpm
+                                          and effective_rpm > rpm)
+                        if capped_uniform:
                             effective_rpm = rpm
                         rpm = round(effective_rpm, 2)
+                        # Burst RPM = peak instantaneous rate in the cycle (= the
+                        # rate during the burst, before the long inter-burst gap).
+                        # Only meaningful when the sequence actually loops; for
+                        # mode="Automatically" the entries are barrel-cycling
+                        # cooldowns for a single-shot weapon, so leave burst_rpm
+                        # pinned to sustained. For uniform Looping sequences burst
+                        # == sustained by definition; mirror the uniform cap so
+                        # BurstRPM doesn't drift above the inner fireRate.
+                        if seq_mode == "Looping" and max_entry_rate > 0:
+                            burst_rpm = round(max_entry_rate, 2)
+                            if capped_uniform and burst_rpm > rpm:
+                                burst_rpm = rpm
                     # ShotPerAction / ShotPerSequence patterns:
                     # - Ship + mixed RPM rates → ShotPerAction (Meteor pattern)
                     # - FPS: already handled below based on unit mix / inner name
@@ -1727,6 +1765,17 @@ def _build_weapon_data(components, ctx, item_type="", is_fps=False):
                 fm["Name"] = mode["name"]
             fm["LocalisedName"] = ln
             fm["RoundsPerMinute"] = rpm
+            # Only emit BurstRoundsPerMinute when it is meaningfully HIGHER than
+            # sustained — i.e. true burst weapons (mode="Looping") with a long
+            # inter-burst pause (today: RSI_Meteor_LaserRepeater_S5 and
+            # VNCL_NeutronCannon_S5). Single-shot weapons whose sequence is
+            # mode="Automatically" for internal barrel cycling (e.g. Leonids)
+            # never reach here — burst_rpm stays pinned to sustained above.
+            # Consumers compute burst DPS as DamagePerShot × BurstRPM / 60. If our
+            # calc ever produces burst < sustained (degenerate FPS sequences with
+            # 0-duration entries), stay silent so consumers fall back to RPM.
+            if burst_rpm and rpm and burst_rpm > rpm + max(0.5, rpm * 0.01):
+                fm["BurstRoundsPerMinute"] = burst_rpm
             fm["FireType"] = fire_type
             fm["AmmoPerShot"] = float(mode.get("ammoCost", default_shots))
             fm["PelletsPerShot"] = float(pellets_per_shot)

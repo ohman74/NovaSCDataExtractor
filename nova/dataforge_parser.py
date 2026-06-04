@@ -1232,6 +1232,9 @@ def _resolve_crafting_targets(raw_blueprints, items_by_class):
     differs from the shared one, re-key to it. Non-colliding blueprints always
     keep their entityClass GUID — this never blanket-overrides the structural
     field. Removable once CIG stops duplicating entityClass values.
+
+    This is a live in-game bug — the wrong blueprint is granted in-game too —
+    tracked at Issue Council STARC-209920.
     """
     from collections import Counter
 
@@ -2018,6 +2021,11 @@ def _parse_weapon_params(comp):
 
         if tag == "SWeaponActionSequenceParams":
             # Sequence wrapper — first inner fire action becomes the mode, plus entries.
+            # The @mode attribute discriminates real burst weapons ("Looping" —
+            # cycle loops while trigger held, e.g. Echion 3-shot burst) from
+            # single-shot weapons that use a sequence purely for internal barrel
+            # cycling ("Automatically" — Leonids: one shot per trigger pull,
+            # entries describe barrel-cycling cooldowns, not a burst pattern).
             seq_entries = []
             for entry in child.iter("SWeaponSequenceEntryParams"):
                 seq_entries.append({
@@ -2025,6 +2033,7 @@ def _parse_weapon_params(comp):
                     "unit": entry.get("unit", ""),
                     "repetitions": safe_int(entry.get("repetitions", "1")),
                 })
+            seq_mode = child.get("mode", "")
             inner_action = None
             for inner_tag in ("SWeaponActionFireSingleParams", "SWeaponActionFireRapidParams",
                               "SWeaponActionFireBurstParams", "SWeaponActionFireChargedParams"):
@@ -2038,6 +2047,8 @@ def _parse_weapon_params(comp):
                     mode["fireType"] = "sequence"
                     if seq_entries:
                         mode["sequenceEntries"] = seq_entries
+                    if seq_mode:
+                        mode["sequenceMode"] = seq_mode
                     firing_modes.append(mode)
 
         elif tag == "SWeaponActionFireChargedParams":

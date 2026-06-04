@@ -354,6 +354,13 @@ The conversion is idempotent — running the pipeline again after a fresh extrac
 - **Builder**: `stditem._build_weapon_data()` line 979-1022
 - **Transformation**: Float RPM; recomputed for charged (based on charge_time + cooldown) and sequence (based on sequence entries with delay units of "Seconds" or "RPM") modes
 
+### Weapon.Firing[].BurstRoundsPerMinute
+- **Target**: `stdItem.Weapon.Firing[].BurstRoundsPerMinute`
+- **Source**: peak instantaneous fire rate within an `SWeaponActionSequenceParams@mode="Looping"` cycle — the rate *during* the burst, before the long inter-burst pause
+- **Parser**: `dataforge_parser._parse_weapon_params()` — captures `SWeaponActionSequenceParams@mode` as `sequenceMode`
+- **Builder**: `stditem._build_weapon_data()` line ~1715-1762
+- **Transformation**: Float RPM. Only emitted when meaningfully higher than sustained `RoundsPerMinute` (`burst > rpm + max(0.5, rpm × 0.01)`) — i.e. true burst weapons only. Single-shot weapons that use a sequence purely for internal barrel cycling (`mode="Automatically"`, e.g. Leonids) never emit it. Consumers compute burst DPS as `DamagePerShot × BurstRoundsPerMinute / 60`; absent → fall back to `RoundsPerMinute`.
+
 ### Weapon.Firing[].FireType
 - **Target**: `stdItem.Weapon.Firing[].FireType`
 - **Source**: Derived from SWeaponAction* type and wrapper context
@@ -1218,7 +1225,7 @@ These are applied as deltas to IFCS fields for items with "_Blade_HND" or "_Blad
 | Field | Source |
 |---|---|
 | `TargetDescription` | `EntityClassDefinition/Components/SItemDefinition/Localization@Description` (parsed into `attachDef.description`) |
-| `RewardSources[]` | reverse index built in `nova/__main__._build_reward_sources_index` from `parsed_contract_rewards.json` and `parsed_scenario_rewards.json`. Keyed by the *blueprint record's* GUID (`bp["blueprintGuid"]`, added by the parser at line ~297). Each entry is one of:<br>**Contract:** `{Kind, MissionClassName, PoolClassName, EffectiveChance, OnMissionResults}`<br>**ScenarioTier:** `{Kind, MissionClassName, PoolClassName, MinPoints}` |
+| `RewardSources[]` | reverse index built in `nova/__main__._build_reward_sources_index` from `parsed_contract_rewards.json` and `parsed_scenario_rewards.json`. Keyed by the *blueprint record's* GUID (`bp["blueprintGuid"]`, set by the parser during the `CraftingBlueprintRecord` parse loop; targets are re-keyed afterwards by `_resolve_crafting_targets`). Each entry is one of:<br>**Contract:** `{Kind, MissionClassName, PoolClassName, EffectiveChance, OnMissionResults}`<br>**ScenarioTier:** `{Kind, MissionClassName, PoolClassName, MinPoints}` |
 
 `EffectiveChance = PoolChance × (weight_in_pool / sum_weights_in_pool)`. Multiple reward sources for the same blueprint each appear as a separate entry; consumers can sum or take the max as appropriate.
 
