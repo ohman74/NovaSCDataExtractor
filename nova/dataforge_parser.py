@@ -28,6 +28,21 @@ import xml.etree.ElementTree as ET
 
 from .utils import safe_float, safe_int, safe_bool
 
+# Top-level DataForge record types we extract. Used both to flag "inside a
+# record" during the streaming parse (children must not be cleared until the
+# record's end handler has run) and as the post-record root-cleanup trigger.
+_RECORD_TYPES = frozenset({
+    "EntityClassDefinition", "SCItemManufacturer", "AmmoParams",
+    "InventoryContainer", "WeaponGimbalModeModifierDef",
+    "SIFCSModifiersLegacy", "CraftingBlueprintRecord",
+    "ActorProceduralRecoilConfig", "ActorProceduralRecoilModifiers",
+    "WeaponProceduralRecoilConfigDef", "WeaponMisfireDef",
+    "BlueprintPoolRecord", "FactionReputation",
+    "SReputationStandingParams", "SReputationScopeParams",
+    "MissionLocality", "ContractGenerator", "ScenarioProgress",
+    "MissionType", "ContractTemplate", "MissionScenario",
+})
+
 
 def _extract_prereqs(root):
     """Walk a `<prerequisites>` or `<additionalPrerequisites>` element and
@@ -259,25 +274,15 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
     in_record = False  # Track if inside any top-level record that needs children preserved
 
     context = ET.iterparse(xml_path, events=("start", "end"))
+    root = None  # DataForge root; records are its direct children
 
     for event, elem in context:
         total_elements += 1
 
         if event == "start":
-            elem_type = elem.get("__type")
-            if elem_type in ("EntityClassDefinition", "SCItemManufacturer", "AmmoParams",
-                              "InventoryContainer", "WeaponGimbalModeModifierDef",
-                              "SIFCSModifiersLegacy", "CraftingBlueprintRecord",
-                              "ActorProceduralRecoilConfig",
-                              "ActorProceduralRecoilModifiers",
-                              "WeaponProceduralRecoilConfigDef",
-                              "WeaponMisfireDef",
-                              "BlueprintPoolRecord", "FactionReputation",
-                              "SReputationStandingParams", "SReputationScopeParams",
-                              "MissionLocality", "ContractGenerator",
-                              "ScenarioProgress",
-                              "MissionType", "ContractTemplate",
-                              "MissionScenario"):
+            if root is None:
+                root = elem
+            if elem.get("__type") in _RECORD_TYPES:
                 in_record = True
             continue
 
@@ -289,6 +294,12 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
                   f"{mfr_count} mfrs | {ammo_count} ammo | {elapsed:.0f}s")
 
         elem_type = elem.get("__type")
+        if elem_type is None:
+            # Fast path — the overwhelming majority of end events are
+            # non-record elements; skip the record-type dispatch chain.
+            if not in_record:
+                elem.clear()
+            continue
 
         if elem_type == "EntityClassDefinition":
             entity_count += 1
@@ -866,6 +877,12 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
         elif not in_record:
             elem.clear()
 
+        # A finished record leaves its cleared shell attached to the root's
+        # child list — drop those so a 2.4 GB parse doesn't accumulate
+        # millions of empty Elements.
+        if root is not None and elem_type in _RECORD_TYPES:
+            root.clear()
+
     elapsed = time.time() - start
     print(f"  Parse complete: {total_elements:,} elements, {entity_count} entities, "
           f"{mfr_count} manufacturers, {ammo_count} ammo, {inv_count} inventory in {elapsed:.0f}s")
@@ -917,7 +934,7 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
         }
         for filename, data in cache_data.items():
             with open(os.path.join(cache_dir, filename), "w", encoding="utf-8") as f:
-                json.dump(data, f)
+                json.dump(data, f, separators=(",", ":"))
         print("  Done")
 
     return (items_by_class, vehicles_by_class, guid_to_class, manufacturers,

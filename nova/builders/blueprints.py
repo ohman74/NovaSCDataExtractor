@@ -121,8 +121,7 @@ def build_blueprints(ctx) -> list[dict]:
     from `bp["blueprintGuid"]` to look up RewardSources, which the
     reverse index in __main__ keys by blueprint GUID.
     """
-    items_by_guid = {rec["guid"].lower(): cn
-                     for cn, rec in ctx.items.items() if rec.get("guid")}
+    items_by_guid = ctx.items_by_guid
 
     out: list[dict] = []
     for target_guid, bp in ctx.crafting_blueprints.items():

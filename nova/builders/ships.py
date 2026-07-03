@@ -1,5 +1,6 @@
 """Build ship data JSON with hardpoints, stats, and default loadout."""
 
+import copy
 import re
 
 from ..utils import safe_float, safe_int, resolve_name
@@ -258,7 +259,7 @@ def build_ships(ctx):
             continue
         if _is_ai_or_excluded_variant(class_name):
             continue
-        ship = _build_ship(class_name, record, ctx)
+        ship = _build_ship_cached(class_name, record, ctx)
         if ship:
             is_ground = _is_ground_vehicle(vehicle)
             ship["IsSpaceship"] = not is_ground
@@ -282,6 +283,23 @@ def build_ships(ctx):
     ships.sort(key=lambda s: s.get("Name", ""))
     print(f"  Built {len(ships)} ships")
     return ships
+
+
+def _build_ship_cached(class_name, record, ctx):
+    """Memoized _build_ship — ground vehicles are built by both build_ships
+    and build_vehicles (merged in slices.py), so the second builder reuses
+    the first build. A deepcopy is returned/stored because both callers
+    mutate the result (Type / IsSpaceship / MovementClass / variant tags).
+    """
+    cache = getattr(ctx, "_built_ship_cache", None)
+    if cache is None:
+        cache = ctx._built_ship_cache = {}
+    if class_name in cache:
+        return copy.deepcopy(cache[class_name])
+    ship = _build_ship(class_name, record, ctx)
+    if ship is not None:
+        cache[class_name] = copy.deepcopy(ship)
+    return ship
 
 
 def _build_ship(class_name, record, ctx):
@@ -654,14 +672,23 @@ def _build_cargo_grid_items_by_name(class_name, ctx):
     double-counting ships like the Reclaimer whose grids are already in
     the loadout.
     """
-    prefix = class_name + "_CargoGrid"
+    # One-time index over ctx.items: family root (className before
+    # "_CargoGrid") -> [cargo-grid classNames]. Replaces an O(ships × items)
+    # startswith scan with an O(1) lookup per ship.
+    idx = getattr(ctx, "_cargo_grid_prefix_idx", None)
+    if idx is None:
+        idx = {}
+        for cn, item in ctx.items.items():
+            if item.get("attachDef", {}).get("type") != "CargoGrid":
+                continue
+            if "_CargoGrid" not in cn:
+                continue
+            idx.setdefault(cn.split("_CargoGrid", 1)[0], []).append(cn)
+        ctx._cargo_grid_prefix_idx = idx
+
     out = []
-    for cn, item in ctx.items.items():
-        if not cn.startswith(prefix):
-            continue
-        ad = item.get("attachDef", {})
-        if ad.get("type") != "CargoGrid":
-            continue
+    for cn in idx.get(class_name, ()):
+        item = ctx.items[cn]
         emit_u = cn not in _CARGOGRID_UNEDITABLE_OMIT
         entry = _cargo_grid_entry_from_item(cn, item, ctx, emit_uneditable=emit_u)
         if entry:

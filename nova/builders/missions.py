@@ -71,11 +71,7 @@ def _build_indices(ctx):
     # bp_guid → target classname. Walk crafting_blueprints (keyed by target
     # GUID) and pivot. items_by_class[target_cn].guid gives us target GUID;
     # bp.blueprintGuid (added by the parser) gives us the bp record GUID.
-    items_by_guid = {
-        rec["guid"].lower(): cn
-        for cn, rec in ctx.items.items()
-        if rec.get("guid")
-    }
+    items_by_guid = ctx.items_by_guid
     bp_to_target = {}
     for target_guid, bp in ctx.crafting_blueprints.items():
         bp_guid = bp.get("blueprintGuid", "").lower()

@@ -196,6 +196,16 @@ def _guid_index_for(items_db):
     return idx
 
 
+# Per-run memo caches. Entity XMLs are immutable within a run and
+# classify_pair is called O(group²) times over the same files — without
+# these, each pair re-parses both XMLs from disk (4 ET.parse per pair).
+# Keys are absolute file paths, so LIVE/PTU runs in one process can't
+# collide. Results are treated as read-only by all callers.
+_LOADOUT_PORTS_CACHE = {}
+_WALK_PATHS_CACHE = {}
+_ARMOR_CN_CACHE = {}
+
+
 def _loadout_ports(xml_path, items_db):
     """Return {hierarchical_port_path: className} for the entity XML.
 
@@ -206,6 +216,9 @@ def _loadout_ports(xml_path, items_db):
     className via items_db so that two ships with identical loadouts but
     mixed name/GUID refs compare equal.
     """
+    cached = _LOADOUT_PORTS_CACHE.get(xml_path)
+    if cached is not None:
+        return cached
     guid_to_class = _guid_index_for(items_db)
     out = {}
 
@@ -232,6 +245,7 @@ def _loadout_ports(xml_path, items_db):
                 _walk(child, prefix)
 
     _walk(ET.parse(xml_path).getroot(), "")
+    _LOADOUT_PORTS_CACHE[xml_path] = out
     return out
 
 
@@ -240,6 +254,10 @@ def _walk_paths(xml_path, allowed_prefixes):
     with one of `allowed_prefixes`. Returns {path: [attrs_dict, ...]}.
     Multi-instance paths (e.g. multiple particle entries) preserve order.
     """
+    cache_key = (xml_path, tuple(allowed_prefixes))
+    cached = _WALK_PATHS_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     out = defaultdict(list)
     tree = ET.parse(xml_path)
 
@@ -256,6 +274,7 @@ def _walk_paths(xml_path, allowed_prefixes):
             walk(c, pp)
 
     walk(tree.getroot())
+    _WALK_PATHS_CACHE[cache_key] = out
     return out
 
 
@@ -566,6 +585,15 @@ def _armor_classname_for_ship(xml_path, items_db):
     Returns "" when no armor port is present (filters out scenario-only
     template ships like AEGS_Idris_P_TSG).
     """
+    cached = _ARMOR_CN_CACHE.get(xml_path)
+    if cached is not None:
+        return cached
+    result = _armor_classname_uncached(xml_path, items_db)
+    _ARMOR_CN_CACHE[xml_path] = result
+    return result
+
+
+def _armor_classname_uncached(xml_path, items_db):
     guid_to_class = _guid_index_for(items_db)
     try:
         root = ET.parse(xml_path).getroot()

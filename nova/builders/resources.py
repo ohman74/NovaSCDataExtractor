@@ -168,9 +168,8 @@ def build_resources(ctx):
             "AvailableSCUSizes": scu_sizes,
         })
 
-    # Item-type (Units) — resolve via items_db's guid index.
-    items_by_guid = {rec["guid"].lower(): cn
-                     for cn, rec in ctx.items.items() if rec.get("guid")}
+    # Item-type (Units) — resolve via items_db's shared guid index.
+    items_by_guid = ctx.items_by_guid
     for guid in sorted(item_guids):
         cn = items_by_guid.get(guid)
         if not cn:

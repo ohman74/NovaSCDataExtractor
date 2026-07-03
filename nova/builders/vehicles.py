@@ -1,7 +1,7 @@
 """Build ground vehicle data JSON."""
 
 from .ships import (
-    _build_ship,
+    _build_ship_cached,
     _cosmetic_base,
     _is_ai_or_excluded_variant,
     _is_ground_vehicle,
@@ -34,7 +34,7 @@ def build_vehicles(ctx):
         if _is_ai_or_excluded_variant(class_name):
             continue
 
-        veh = _build_ship(class_name, record, ctx)
+        veh = _build_ship_cached(class_name, record, ctx)
         if veh:
             veh["IsSpaceship"] = False
             veh["IsGravlev"] = vehicle.get("isGravlevVehicle", False)

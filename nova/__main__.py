@@ -158,6 +158,19 @@ class BuildContext:
         self.mission_scenarios = mission_scenarios or {}
         # Reverse index built downstream in __main__: bp_guid → [{Kind, …}].
         self.reward_sources_by_bp_guid = {}
+        self._items_by_guid = None
+
+    @property
+    def items_by_guid(self):
+        """Lazy {item_guid.lower(): className} index shared by builders.
+
+        blueprints/missions/resources each used to rebuild this O(N) map."""
+        if self._items_by_guid is None:
+            self._items_by_guid = {
+                rec["guid"].lower(): cn
+                for cn, rec in self.items.items() if rec.get("guid")
+            }
+        return self._items_by_guid
 
     def resolve_name(self, raw_name):
         return resolve_name(raw_name, self.translations)
@@ -597,7 +610,14 @@ def run_extraction(config, args):
     )
     _ROOT_TAG_RE = re.compile(r'<EntityClassDefinition\.(\w+)[^>]*__ref="([^"]+)"')
     for original, xml_file in entity_xml_map.items():
-        data = parse_entity_file(xml_file)
+        # Read once; the same bytes feed both the ET parse and the regex
+        # scans below (previously each file was opened twice).
+        try:
+            with open(xml_file, "rb") as f:
+                raw = f.read()
+        except OSError:
+            raw = None
+        data = parse_entity_file(xml_file, raw=raw)
         parsed_cn = ""
         if data:
             parsed_cn = data.get("ClassName", data.get("className", ""))
@@ -605,8 +625,9 @@ def run_extraction(config, args):
                 parsed_cn = os.path.splitext(os.path.basename(original))[0]
             entity_data_map[parsed_cn] = data
         try:
-            with open(xml_file, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read()
+            if raw is None:
+                raise OSError("unreadable")
+            content = raw.decode("utf-8", errors="replace")
             mr = _ROOT_TAG_RE.search(content)
             cn_key = mr.group(1) if mr else parsed_cn
             guid = mr.group(2) if mr else None
@@ -651,6 +672,7 @@ def run_extraction(config, args):
     # cosmetic variants of Titan/Taurus because both sides were empty
     # Modifications/ files that compared equal.
     entity_xml_by_class = {}
+    vehicles_lower = {cn.lower(): cn for cn in vehicles_by_class}
     _ENTITY_DIR_TOKENS = (
         os.sep.join(["entities", "spaceships"]).lower(),
         os.sep.join(["entities", "groundvehicles"]).lower(),
@@ -663,11 +685,7 @@ def run_extraction(config, args):
         if not any(tok in norm for tok in _ENTITY_DIR_TOKENS):
             continue
         cn_lower = os.path.splitext(os.path.basename(original))[0].lower()
-        matched = None
-        for cn in vehicles_by_class:
-            if cn.lower() == cn_lower:
-                matched = cn
-                break
+        matched = vehicles_lower.get(cn_lower)
         if matched:
             entity_xml_by_class[matched] = xml_file
 
@@ -761,6 +779,7 @@ def run_extraction(config, args):
 
     print(f"\n[BUILD] Building {len(categories)} dataset(s)...")
 
+    build_counts = {}
     for category in categories:
         filename, builder_fn, uses_vehicles = BUILDERS[category]
         print(f"\n  Building {category}...")
@@ -770,6 +789,7 @@ def run_extraction(config, args):
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2, ensure_ascii=False)
 
+        build_counts[category] = len(result)
         print(f"  Wrote {output_path} ({len(result)} items)")
 
     # Write metadata
@@ -779,19 +799,11 @@ def run_extraction(config, args):
         "buildVersion": version_info["version"],
         "p4Change": version_info["p4_change"],
         "buildDate": version_info["build_date"],
-        "channel": os.path.basename(config.sc_live_path),
+        "channel": config.channel,
         "extractionTimestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "novaVersion": __version__,
-        "counts": {},
+        "counts": build_counts,
     }
-
-    for category in categories:
-        filename = BUILDERS[category][0]
-        output_path = os.path.join(config.output_dir, filename)
-        if os.path.isfile(output_path):
-            with open(output_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            metadata["counts"][category] = len(data)
 
     meta_path = os.path.join(config.output_dir, "metadata.json")
     with open(meta_path, "w", encoding="utf-8") as f:

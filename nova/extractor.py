@@ -48,18 +48,11 @@ def extract_files(unp4k_path, p4k_path, pattern, output_dir, timeout=600):
         stderr = result.stderr.strip() if result.stderr else ""
         raise RuntimeError(f"unp4k failed (exit {result.returncode}): {stderr}")
 
-    # Count output lines to see how many files were processed
+    # Count output lines to see how many files were processed. (No cache-wide
+    # os.walk here — it cost 10-30 s per pass and no caller used the list.)
     lines = result.stdout.strip().splitlines() if result.stdout else []
     print(f"  unp4k processed {len(lines)} entries in {elapsed:.1f}s")
-
-    # Collect all files in output directory
-    extracted = []
-    for root, dirs, files in os.walk(output_dir):
-        for f in files:
-            extracted.append(os.path.join(root, f))
-
-    print(f"  Total files in cache: {len(extracted)}")
-    return extracted
+    return len(lines)
 
 
 def extract_all_xml_and_dcb(config):

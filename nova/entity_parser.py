@@ -6,15 +6,19 @@ import xml.etree.ElementTree as ET
 from .utils import safe_float, safe_int, safe_bool
 
 
-def parse_entity_file(xml_path):
+def parse_entity_file(xml_path, raw=None):
     """Parse a single entity XML file.
 
+    `raw` optionally carries the file's bytes when the caller already read
+    them (avoids a second disk read); xml_path is still used for messages.
     Returns a dict with the entity's component hierarchy, ports, and loadouts.
     Returns None if the file cannot be parsed.
     """
     try:
-        tree = ET.parse(xml_path)
-        root = tree.getroot()
+        if raw is not None:
+            root = ET.fromstring(raw)
+        else:
+            root = ET.parse(xml_path).getroot()
     except ET.ParseError as e:
         print(f"  [WARN] Failed to parse {os.path.basename(xml_path)}: {e}")
         return None
