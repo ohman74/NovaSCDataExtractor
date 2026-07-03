@@ -3029,11 +3029,17 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
     # slots) — any CargoGrid named after the ship belongs to a module, not
     # the base ship, and reference treats the base ship as having no grid.
     cargo_grid_items = _build_cargo_grid_items_from_loadout(loadout_entries, ctx)
-    has_modules = any(
-        "module" in (e.get("portName", "").lower())
-        and (e.get("entityClassName") or e.get("entityClassReference"))
-        for e in loadout_entries
-    )
+    # Modular hardpoint = an occupied port whose impl port-def types include
+    # "Module" (structural; replaces "module"-in-portName matching).
+    has_modules = False
+    for e in loadout_entries:
+        if not (e.get("entityClassName") or e.get("entityClassReference")):
+            continue
+        e_pn = e.get("portName", "")
+        e_pd = port_defs.get(e_pn) or port_defs_lower.get(e_pn.lower()) or {}
+        if "Module" in (e_pd.get("types") or []):
+            has_modules = True
+            break
     if not cargo_grid_items and class_name and not has_modules:
         cargo_grid_items = _build_cargo_grid_items_by_name(class_name, ctx)
     if cargo_grid_items:

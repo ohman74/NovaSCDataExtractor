@@ -422,6 +422,32 @@ def _get_grenade_damage_profile(components):
     }
 
 
+def _iter_weapon_magazines(default_loadout, ctx):
+    """Yield installed magazine item records from a weapon's defaultLoadout.
+
+    Structural rule (GUID > className > name): resolve each entry's item and
+    keep those typed WeaponAttachment.Magazine. Verified on the full corpus:
+    every resolvable item on a magazine/ammo port has exactly this type and
+    no other port carries it, so no portName substring matching is needed.
+    """
+    if not isinstance(default_loadout, list):
+        return
+    for entry in default_loadout:
+        cn = entry.get("entityClassName") or ""
+        if not cn:
+            ref = entry.get("entityClassReference") or ""
+            if ref:
+                cn = ctx.resolve_guid(ref) or ""
+        if not cn:
+            continue
+        mag = ctx.get_item(cn)
+        if not mag:
+            continue
+        ad = mag.get("attachDef") or {}
+        if ad.get("type") == "WeaponAttachment" and ad.get("subType") == "Magazine":
+            yield mag
+
+
 def _get_fps_damage_profile(components, ctx):
     """Walk weapon → magazine → ammo to extract the damage profile.
 
@@ -429,22 +455,7 @@ def _get_fps_damage_profile(components, ctx):
     bool 'has_damage_drop'. Returns None if the item has no resolvable ammo
     (covers attachments, melee, gadgets without ammo).
     """
-    loadout = components.get("defaultLoadout", [])
-    if not isinstance(loadout, list):
-        return None
-    for entry in loadout:
-        pn = (entry.get("portName") or "").lower()
-        if "magazine" not in pn and "ammo" not in pn:
-            continue
-        cn = entry.get("entityClassName") or ""
-        ref = entry.get("entityClassReference") or ""
-        if not cn and ref:
-            cn = ctx.resolve_guid(ref)
-        if not cn:
-            continue
-        mag = ctx.get_item(cn)
-        if not mag:
-            continue
+    for mag in _iter_weapon_magazines(components.get("defaultLoadout", []), ctx):
         ammo_guid = (mag.get("components", {}).get("ammo", {}) or {}).get("ammoParamsRecord", "")
         ammo_data = ctx.get_ammo(ammo_guid) if ammo_guid else None
         if not ammo_data:
@@ -488,7 +499,13 @@ _SINGLETON_FIRE_ACTION_CLASS = {
 }
 
 
-def _fps_class_value(class_name, full_type, mfr_code, damage_profile=None,
+# Lightning Bolt Co's SCItemManufacturer record. Its code and name are
+# placeholders in CIG data, so the GUID is the only structural identifier
+# for the Electron-class labeling below.
+_LBCO_MFR_GUID = "98bb2e9e-fcc7-46e5-9ba6-d34c42c414e0"
+
+
+def _fps_class_value(class_name, full_type, mfr_guid, damage_profile=None,
                       fire_actions=None, tags="", name_is_placeholder=False):
     """Return (has_class, class_value) for an FPS item.
 
@@ -594,14 +611,16 @@ def _fps_class_value(class_name, full_type, mfr_code, damage_profile=None,
         distortion = damage_profile.get("distortion", 0)
         stun = damage_profile.get("stun", 0)
         has_drop = damage_profile.get("has_damage_drop", False)
-        prefix = class_name.lower().split("_", 1)[0]
 
         # Pure ballistic (covers _ballistic_ and _multi_ named items).
         if phys > 0 and energy == 0:
             return (True, "Ballistic")
         # Energy with electron signature (distortion+stun damage).
         if energy > 0 and (distortion > 0 or stun > 0):
-            if prefix == "lbco":
+            # Lightning Bolt Co items label plain "Electron" in REF. The
+            # mfr record's code/name are placeholders in CIG data, so the
+            # manufacturer GUID is the structural key (GUID > className).
+            if mfr_guid == _LBCO_MFR_GUID:
                 return (True, "Electron")
             return (True, "Energy (Electron)")
         # Pure energy: Plasma (with damageDrop) vs Laser (without).
@@ -721,12 +740,13 @@ def build_std_item(record, ctx, external_loadout=None, nested=False):
     placeholder_class_types = full_type in _TYPES_PLACEHOLDER_FORCE_CLASS
 
     if is_fps and not nested:
-        mfr_code = (mfr or {}).get("Code", "") if mfr else ""
         damage_profile = (_get_fps_damage_profile(components, ctx)
                            or _get_grenade_damage_profile(components))
         fire_actions = set(((components.get("weapon") or {}).get("fireActionTypes") or []))
         tags = attach_def.get("tags", "") or ""
-        has_cls, cls_val = _fps_class_value(class_name, full_type, mfr_code, damage_profile,
+        has_cls, cls_val = _fps_class_value(class_name, full_type,
+                                             attach_def.get("manufacturerGuid", ""),
+                                             damage_profile,
                                              fire_actions=fire_actions, tags=tags,
                                              name_is_placeholder=name_is_placeholder)
         if has_cls:
@@ -2130,24 +2150,7 @@ def _build_single_firing_mode(mode, ctx, weapon):
 
 def _resolve_fps_ammo(weapon_data, default_loadout, ctx):
     """Resolve FPS weapon ammo from the magazine in the default loadout."""
-    for entry in default_loadout:
-        pn = entry.get("portName", "").lower()
-        if "magazine" not in pn and "ammo" not in pn:
-            continue
-
-        cn = entry.get("entityClassName", "")
-        ref = entry.get("entityClassReference", "")
-
-        resolved = cn
-        if not cn and ref:
-            resolved = ctx.resolve_guid(ref)
-        if not resolved:
-            continue
-
-        mag_item = ctx.get_item(resolved)
-        if not mag_item:
-            continue
-
+    for mag_item in _iter_weapon_magazines(default_loadout, ctx):
         mag_ammo = mag_item.get("components", {}).get("ammo", {})
         ammo_guid = mag_ammo.get("ammoParamsRecord", "")
         ammo_data = ctx.get_ammo(ammo_guid)
