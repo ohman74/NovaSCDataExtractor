@@ -11,6 +11,7 @@ to populate Store / Career / Role / Cargo placeholders in
 """
 import json
 import os
+import re
 
 import requests
 
@@ -111,11 +112,8 @@ def load_matrix(cache_root):
 
 # ───────────────────────── matching: matrix ↔ our records ──────────────
 
-import re
-
-
-# ClassName-prefix → matrix manufacturer_code aliases. Most align on their own.
-MFR_ALIASES = {}
+# Per-className manufacturer-code aliases can be reintroduced here if a
+# future ClassName prefix doesn't align on its own with the matrix code.
 
 # Per-ClassName override: the matrix entry this ClassName should pair with.
 # Used when CIG's marketing name (matrix) differs from the in-game localised
@@ -252,7 +250,7 @@ def _mfr_code_for_ours(class_name, name):
             if code:
                 return code
     prefix = class_name.split("_", 1)[0] if "_" in class_name else class_name
-    return MFR_ALIASES.get(prefix, prefix)
+    return prefix
 
 
 def _propagate_via_vehicle_def(matches, records, vehicle_defs):

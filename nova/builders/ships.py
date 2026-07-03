@@ -3,8 +3,9 @@
 import copy
 import re
 
-from ..utils import safe_float, safe_int, resolve_name
+from ..utils import safe_float, safe_int, resolve_name, NULL_GUID
 from ..vehicle_impl_parser import get_vehicle_impl_data
+from .stditem import _clean_description
 
 # Movement classes that indicate ground vehicles (case-insensitive)
 _GROUND_MOVEMENT_CLASSES = {"arcadewheeled", "wheeled", "tracked"}
@@ -313,16 +314,13 @@ def _build_ship(class_name, record, ctx):
     mfr_guid = vehicle.get("manufacturerGuid", "") or attach_def.get("manufacturerGuid", "")
     mfr = ctx.get_manufacturer(mfr_guid)
 
-    from .stditem import _clean_description
-    import re as _re
-
     # Ship descriptions sometimes use "\n \n" (newline-space-newline) as a
     # separator between metadata and body instead of "\n\n". Normalize before
     # the metadata-stripping step in _clean_description.
     raw_desc = ctx.resolve_name(vehicle.get("vehicleDescription", ""))
     if "\\n" in raw_desc:
         raw_desc_tmp = raw_desc.replace("\\n", "\n")
-        raw_desc_tmp = _re.sub(r"\n[ \t]+\n", "\n\n", raw_desc_tmp)
+        raw_desc_tmp = re.sub(r"\n[ \t]+\n", "\n\n", raw_desc_tmp)
         raw_desc = raw_desc_tmp.replace("\n", "\\n")
 
     # Career/Role: use the in-game semantic fields directly.
@@ -414,7 +412,7 @@ def _build_ship(class_name, record, ctx):
         ship["Hull"] = hull
 
     # Cargo from cargo grid inventories in loadout (with by-name fallback)
-    cargo = _build_cargo(default_loadout, ctx, class_name=class_name)
+    cargo = _build_cargo(default_loadout, ctx)
     if cargo:
         ship["Cargo"] = cargo
 
@@ -1009,7 +1007,7 @@ def _build_emissions(record):
     }
 
 
-def _build_cargo(loadout_entries, ctx, class_name=None):
+def _build_cargo(loadout_entries, ctx):
     """Compute Cargo SCU from cargo grid and storage inventories.
 
     Walks the ship's defaultLoadout, descending into each installed item's
@@ -1187,7 +1185,6 @@ def _build_flight_characteristics(loadout_entries, ctx):
     def _walk_loadout(entries):
         nonlocal ifcs, qd_spool, has_vtol
         for entry in entries:
-            pn = entry.get("portName", "").lower()
             entity_class, item_record = _resolve_entry(entry, ctx)
             if item_record:
                 comps = item_record.get("components", {})
@@ -1362,7 +1359,6 @@ def _build_fuel_management(loadout_entries, ctx):
     def _walk(entries):
         nonlocal fuel_capacity, quantum_fuel_capacity, fuel_intake_rate
         for entry in entries:
-            pn = entry.get("portName", "").lower()
             entity_class, item_record = _resolve_entry(entry, ctx)
             if item_record:
                 comps = item_record.get("components", {})
@@ -2937,7 +2933,6 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
         if entity_class or entity_ref:
             continue  # Already handled above
         # Empty port — classify and add if it's a countable category
-        pn = port_name.lower()
         port_def = port_defs.get(port_name, {})
         item_type = ""
         if port_def and port_def.get("types"):
@@ -3785,13 +3780,13 @@ def _enrich_controllers(tree, loadout_entries, ctx, class_name):
                 if isinstance(ab, dict) and ab:
                     block = {}
                     regen = ab.get("capacitorAssignmentInputOutputRegen", "")
-                    if regen and regen != "00000000-0000-0000-0000-000000000000":
+                    if regen and regen != NULL_GUID:
                         block["Regen"] = regen
                     regen_nav = ab.get("capacitorAssignmentInputOutputRegenNavMode", "")
-                    if regen_nav and regen_nav != "00000000-0000-0000-0000-000000000000":
+                    if regen_nav and regen_nav != NULL_GUID:
                         block["RegenNavMode"] = regen_nav
                     usage = ab.get("capacitorAssignmentInputOutputUsage", "")
-                    if usage and usage != "00000000-0000-0000-0000-000000000000":
+                    if usage and usage != NULL_GUID:
                         block["Usage"] = usage
                     # AngVelocity: afterburnerAngCapacitorScalingCurve.points.Vec2
                     curve = ab.get("afterburnerAngCapacitorScalingCurve", {}) or {}

@@ -237,17 +237,6 @@ def build_ship_equipment(ctx):
         if base_type not in _INCLUDED_TYPES:
             continue
 
-        # Skip FPS items (handled by fps_weapons/fps_attachments).
-        # Use path only for personal/FPS item types so that ship weapons with
-        # "_fps_balance" suffixes (like GATS_BallisticGatling_Mounted_S1) stay.
-        path = record.get("path", "").lower()
-        if "personal" in item_type.lower():
-            continue
-        if "fps" in path and base_type in {"WeaponPersonal", "FPS_Deployable",
-                                             "FPS_Consumable", "FPS_Radar",
-                                             "RemovableChip"}:
-            continue
-
         # Skip non-equippable items: templates, test items, NPC-only.
         # Cosmetic variants (LowPoly, color skins) are NOT filtered here —
         # they're tagged below.

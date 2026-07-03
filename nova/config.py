@@ -52,9 +52,6 @@ class Config:
             errors.append(f"unforge.exe not found at: {self.unforge_path}")
         return errors
 
-    def get_game_version(self):
-        return self.get_version_info().get("branch", "unknown")
-
     def get_version_info(self):
         """Full build manifest snapshot: branch, build version, p4 change, build date.
 

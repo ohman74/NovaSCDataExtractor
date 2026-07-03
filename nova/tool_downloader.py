@@ -10,7 +10,6 @@ GITHUB_API_URL = "https://api.github.com/repos/dolkensp/unp4k/releases/latest"
 
 REQUIRED_FILES = {
     "unp4k": "unp4k-suite",
-    "unforge": "unforge",
 }
 
 

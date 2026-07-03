@@ -26,7 +26,7 @@ import json
 import time
 import xml.etree.ElementTree as ET
 
-from .utils import safe_float, safe_int, safe_bool
+from .utils import safe_float, safe_int, safe_bool, NULL_GUID
 
 # Top-level DataForge record types we extract. Used both to flag "inside a
 # record" during the streaming parse (children must not be cleared until the
@@ -1730,7 +1730,7 @@ def _parse_attach_def(elem):
     }
 
     manufacturer = elem.get("Manufacturer", "")
-    if manufacturer and manufacturer != "00000000-0000-0000-0000-000000000000":
+    if manufacturer and manufacturer != NULL_GUID:
         result["manufacturerGuid"] = manufacturer
 
     loc_elem = elem.find("Localization")
@@ -1806,12 +1806,12 @@ def _parse_weapon_params(comp):
 
     # Gimbal mode modifier record GUID (references WeaponGimbalModeModifierDef)
     gimbal_guid = comp.get("gimbalModeModifierRecord", "")
-    if gimbal_guid and gimbal_guid != "00000000-0000-0000-0000-000000000000":
+    if gimbal_guid and gimbal_guid != NULL_GUID:
         result["gimbalModeModifierRecord"] = gimbal_guid
 
     # Recoil config record GUID (FPS weapons — references ActorProceduralRecoilConfig)
     recoil_guid = comp.get("actorProceduralRecoilConfig", "")
-    if recoil_guid and recoil_guid != "00000000-0000-0000-0000-000000000000":
+    if recoil_guid and recoil_guid != NULL_GUID:
         result["actorProceduralRecoilConfig"] = recoil_guid
 
     # Geometry / skin tag — non-empty value identifies a visual skin variant
@@ -2284,10 +2284,10 @@ def _parse_fire_action(action):
     # - @recoil → WeaponProceduralRecoilConfigDef (per-mode base recoil curves)
     # - @misfire → WeaponMisfireDef (jam mechanics)
     rcfg = action.get("recoil")
-    if rcfg and rcfg != "00000000-0000-0000-0000-000000000000":
+    if rcfg and rcfg != NULL_GUID:
         mode["recoilConfig"] = rcfg
     mf = action.get("misfire")
-    if mf and mf != "00000000-0000-0000-0000-000000000000":
+    if mf and mf != NULL_GUID:
         mode["misfire"] = mf
 
     # Spin-up/down for rapid fire (gatling) weapons
@@ -2422,16 +2422,6 @@ def _parse_quantum_drive_params(comp):
             "Stage1AccelerationRate": safe_float(spline_jump.get("stageOneAccelRate")),
             "State2AccelerationRate": safe_float(spline_jump.get("stageTwoAccelRate")),
             "SpoolUpTime": safe_float(spline_jump.get("spoolUpTime")),
-        }
-
-    # Spline jump params
-    spline_jump = comp.find("splineJump")
-    if spline_jump is not None:
-        result["splineJump"] = {
-            "speed": safe_float(spline_jump.get("Speed", spline_jump.get("speed"))),
-            "cooldown": safe_float(spline_jump.get("Cooldown", spline_jump.get("cooldown"))),
-            "stage1AccelerationRate": safe_float(spline_jump.get("Stage1AccelerationRate")),
-            "spoolUpTime": safe_float(spline_jump.get("SpoolUpTime", spline_jump.get("spoolUpTime"))),
         }
 
     return result
@@ -2711,13 +2701,13 @@ def _parse_item_port(elem):
         ref = entry.get("entityClassReference", "")
         if cn:
             port["defaultLoadout"] = cn
-        elif ref and ref != "00000000-0000-0000-0000-000000000000":
+        elif ref and ref != NULL_GUID:
             port["defaultLoadoutRef"] = ref
         break
 
     # Sub-ports
     sub_ports_elem = elem.find("Ports")
-    if sub_ports_elem is not None and sub_ports_elem is not elem.find("Types"):
+    if sub_ports_elem is not None:
         sub_ports = []
         for sp in sub_ports_elem:
             parsed = _parse_item_port(sp)
@@ -2833,7 +2823,7 @@ def _parse_default_loadout(comp):
             "entityClassName": entry_elem.get("entityClassName", ""),
         }
         ref = entry_elem.get("entityClassReference", "")
-        if ref and ref != "00000000-0000-0000-0000-000000000000":
+        if ref and ref != NULL_GUID:
             entry["entityClassReference"] = ref
 
         children = []
@@ -2898,8 +2888,3 @@ def _elem_to_dict(elem):
             result[tag] = child_dict
 
     return result
-
-
-def _parse_simple_dict(elem):
-    """Convert element to a simple dict of attributes."""
-    return dict(elem.attrib)

@@ -3,6 +3,9 @@
 import os
 
 
+NULL_GUID = "00000000-0000-0000-0000-000000000000"
+
+
 def parse_localization(ini_path):
     """Parse global.ini localization file into a dict.
 

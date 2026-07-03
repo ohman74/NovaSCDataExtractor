@@ -4,8 +4,6 @@ Produces the rich item data format used downstream — Durability,
 ResourceNetwork, HeatController, Weapon stats, etc.
 """
 
-import re
-
 from ..utils import safe_float, safe_int, resolve_name
 
 
@@ -74,7 +72,6 @@ _TYPES_NEVER_CLASS = frozenset({
     "Missile.UNDEFINED", "Missile.Rocket",
     "Flair_Cockpit.Flair_Hanging",
 })
-_BASE_TYPES_NEVER_CLASS = frozenset()
 
 # Types for which the description-based rule is INVERTED:
 # ref sets Class only when description is empty/placeholder.
@@ -228,12 +225,6 @@ _BASE_TYPES_NO_MASS = frozenset({
     "Paints",
 })
 
-# Types where ref omits Mass only when volume == 1 (placeholder/ship-integrated items).
-_BASE_TYPES_NO_MASS_IF_V1 = frozenset()
-_TYPES_NO_MASS_IF_V1 = frozenset({
-    "Flair_Cockpit.Flair_Static",
-})
-
 # Base types for which Class takes an actual manufacturer-class value (not "")
 _COMPONENT_TYPES_CLASSED = frozenset({
     "Shield", "Cooler", "PowerPlant", "QuantumDrive", "Radar",
@@ -248,22 +239,6 @@ _FPS_CLASS_OMIT = frozenset({
     "grin_cutter_01",
     "Multitool_Attachment",
 })
-
-# Empty — every previous member is now classified structurally.
-# Kept as a hook for future last-resort entries.
-_FPS_CLASS_EMPTY = frozenset()
-
-# Explicit FPS Class values by className — overrides all pattern-based rules.
-_FPS_CLASS_BY_CLASSNAME = {
-    # Multitool sub-attachments removed — handled structurally by
-    # `WeaponAttachment.Utility + tags contains 'grin_multitool_01' +
-    # className suffix lookup` rule in `_fps_class_value` via
-    # `_MULTITOOL_SUFFIX_CLASS`.
-    # Empty \u2014 every previous member is now classified structurally
-    # (sasu toys via type=Small + tags="toy", ksar SMG via damage profile,
-    # multitool subset via _MULTITOOL_SUFFIX_CLASS, gadgets via tags).
-    # Kept as a hook for future last-resort entries.
-}
 
 def _build_recoil_block(components, ctx):
     """Build the Recoil block from the weapon's actorProceduralRecoilConfig chain.
@@ -534,9 +509,6 @@ def _fps_class_value(class_name, full_type, mfr_code, damage_profile=None,
        - damage.energy + (distortion or stun) → Electron family
        - damage.energy + damageDrop → Plasma
        - damage.energy + no drop → Laser
-    5. Editorial overrides (`_FPS_CLASS_BY_CLASSNAME`, `_FPS_CLASS_EMPTY`)
-       for residual items where CIG/ref deviate from structural truth
-       (NBSP unicode label, "Laser"-without-prefix, "Foam Dart" toy).
     """
     # Light.Weapon and other opaque types → always omit
     if full_type == "Light.Weapon":
@@ -606,13 +578,6 @@ def _fps_class_value(class_name, full_type, mfr_code, damage_profile=None,
         if only in _SINGLETON_FIRE_ACTION_CLASS:
             return (True, _SINGLETON_FIRE_ACTION_CLASS[only])
 
-    # Explicit per-item editorial overrides (NBSP unicode label,
-    # "Laser"-without-prefix, "Foam Dart" toy).
-    if class_name in _FPS_CLASS_BY_CLASSNAME:
-        return (True, _FPS_CLASS_BY_CLASSNAME[class_name])
-    # Items forced to empty Class.
-    if class_name in _FPS_CLASS_EMPTY:
-        return (True, "")
     # All WeaponAttachment.* except Utility → empty Class
     if full_type in ("WeaponAttachment.Barrel", "WeaponAttachment.IronSight",
                       "WeaponAttachment.BottomAttachment", "WeaponAttachment.Missile"):
@@ -720,18 +685,12 @@ def build_std_item(record, ctx, external_loadout=None, nested=False):
         if classification:
             si["Classification"] = classification
 
-    # Mass from physics (ref omits Mass for certain types, and for specific types when volume=1 is a placeholder)
-    raw_volume = attach_def.get("volume", 0)
-    try:
-        volume_is_one = int(raw_volume) == 1
-    except (TypeError, ValueError):
-        volume_is_one = False
+    # Mass from physics (ref omits Mass for certain types)
     base = full_type.split(".")[0] if full_type else ""
     cn = record.get("className", "")
     skip_mass = (
         full_type in _TYPES_NO_MASS
         or base in _BASE_TYPES_NO_MASS
-        or (volume_is_one and (base in _BASE_TYPES_NO_MASS_IF_V1 or full_type in _TYPES_NO_MASS_IF_V1))
     )
     if not skip_mass:
         physics = components.get("physics", {})
@@ -787,7 +746,7 @@ def build_std_item(record, ctx, external_loadout=None, nested=False):
         should_have_class = False
     elif full_type == "Turret.GunTurret" and class_name in _TURRETS_WITHOUT_CLASS:
         should_have_class = False
-    elif full_type in _TYPES_NEVER_CLASS or base_type in _BASE_TYPES_NEVER_CLASS:
+    elif full_type in _TYPES_NEVER_CLASS:
         should_have_class = False
     elif full_type in _TYPES_INVERTED_CLASS:
         # WeaponDefensive: inverted rule (empty desc → has Class), plus specific
@@ -3378,6 +3337,11 @@ def _build_missiles_controller(mc):
     }
 
 
+# Cargo grid cell size (meters). Interior dimensions are divided into
+# whole cells of this size to derive Width/Height/Depth in SCU-grid units.
+_CARGO_CELL = 1.25
+
+
 def _build_cargo_fields(si, rc, inv_comp, class_name, full_type, ctx):
     """Build CargoGrid and/or CargoContainers based on item type.
 
@@ -3427,7 +3391,7 @@ def _build_cargo_fields(si, rc, inv_comp, class_name, full_type, ctx):
         if isinstance(dim, dict):
             dx = safe_float(dim.get("x", 0))
             if dx:
-                width = float(int(dx / 1.25))
+                width = float(int(dx / _CARGO_CELL))
         if capacity:
             si["CargoGrid"] = {
                 "Capacity": capacity,
@@ -3441,9 +3405,9 @@ def _build_cargo_fields(si, rc, inv_comp, class_name, full_type, ctx):
     # Other Container/Cargo items with inventory container data → full CargoGrid.
     if container_data:
         dim = container_data.get("interiorDimensions") or {}
-        width = float(int(safe_float(dim.get("x", 0)) / 1.25)) if dim else 1.0
-        depth = float(int(safe_float(dim.get("y", 0)) / 1.25)) if dim else 0.0
-        height = float(int(safe_float(dim.get("z", 0)) / 1.25)) if dim else 0.0
+        width = float(int(safe_float(dim.get("x", 0)) / _CARGO_CELL)) if dim else 1.0
+        depth = float(int(safe_float(dim.get("y", 0)) / _CARGO_CELL)) if dim else 0.0
+        height = float(int(safe_float(dim.get("z", 0)) / _CARGO_CELL)) if dim else 0.0
         cargo_grid = {
             "Capacity": capacity,
             "Width": width,
@@ -3453,17 +3417,17 @@ def _build_cargo_fields(si, rc, inv_comp, class_name, full_type, ctx):
         min_size = container_data.get("minPermittedItemSize")
         max_size = container_data.get("maxPermittedItemSize")
         if isinstance(min_size, dict):
-            mw = float(int(safe_float(min_size.get("x", 0)) / 1.25)) if min_size else 0.0
-            md = float(int(safe_float(min_size.get("y", 0)) / 1.25)) if min_size else 0.0
-            mh = float(int(safe_float(min_size.get("z", 0)) / 1.25)) if min_size else 0.0
+            mw = float(int(safe_float(min_size.get("x", 0)) / _CARGO_CELL)) if min_size else 0.0
+            md = float(int(safe_float(min_size.get("y", 0)) / _CARGO_CELL)) if min_size else 0.0
+            mh = float(int(safe_float(min_size.get("z", 0)) / _CARGO_CELL)) if min_size else 0.0
             cargo_grid["MinContainerSize"] = {
                 "Capacity": mw * md * mh or 1.0,
                 "Width": mw, "Height": mh, "Depth": md,
             }
         if isinstance(max_size, dict):
-            xw = float(int(safe_float(max_size.get("x", 0)) / 1.25)) if max_size else 0.0
-            xd = float(int(safe_float(max_size.get("y", 0)) / 1.25)) if max_size else 0.0
-            xh = float(int(safe_float(max_size.get("z", 0)) / 1.25)) if max_size else 0.0
+            xw = float(int(safe_float(max_size.get("x", 0)) / _CARGO_CELL)) if max_size else 0.0
+            xd = float(int(safe_float(max_size.get("y", 0)) / _CARGO_CELL)) if max_size else 0.0
+            xh = float(int(safe_float(max_size.get("z", 0)) / _CARGO_CELL)) if max_size else 0.0
             cargo_grid["MaxContainerSize"] = {
                 "Capacity": xw * xd * xh or 1.0,
                 "Width": xw, "Height": xh, "Depth": xd,

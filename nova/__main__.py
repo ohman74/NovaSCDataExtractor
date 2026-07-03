@@ -25,7 +25,7 @@ from .converter import convert_game_dcb, convert_entities
 from .dataforge_parser import stream_parse_dataforge
 from .entity_parser import parse_entity_file
 from .vehicle_impl_parser import parse_vehicle_implementations
-from .utils import parse_localization, resolve_name
+from .utils import parse_localization, resolve_name, NULL_GUID
 from .cosmetic_classifier import (
     identify_cosmetic_variants,
     identify_variants,
@@ -182,7 +182,7 @@ class BuildContext:
         (caller should omit the field entirely). Returns an empty dict {} when
         the record exists but resolves to empty/unresolved values (REF emits
         an empty Manufacturer block in this case)."""
-        if not guid or guid == "00000000-0000-0000-0000-000000000000":
+        if not guid or guid == NULL_GUID:
             return None
         mfr = self.manufacturers.get(guid)
         if mfr:
@@ -203,7 +203,7 @@ class BuildContext:
 
     def get_ammo(self, guid):
         """Get ammo params by GUID."""
-        if not guid or guid == "00000000-0000-0000-0000-000000000000":
+        if not guid or guid == NULL_GUID:
             return None
         return self.ammo.get(guid)
 
@@ -213,7 +213,7 @@ class BuildContext:
 
     def get_inventory_capacity(self, guid):
         """Get inventory container capacity in SCU by GUID."""
-        if not guid or guid == "00000000-0000-0000-0000-000000000000":
+        if not guid or guid == NULL_GUID:
             return 0
         container = self.inventory_containers.get(guid)
         if container:
@@ -222,34 +222,34 @@ class BuildContext:
 
     def resolve_guid(self, guid):
         """Resolve a GUID to a className."""
-        if not guid or guid == "00000000-0000-0000-0000-000000000000":
+        if not guid or guid == NULL_GUID:
             return None
         return self.guids.get(guid)
 
     def get_gimbal_modifier(self, guid):
         """Get gimbal mode modifier data by GUID."""
-        if not guid or guid == "00000000-0000-0000-0000-000000000000":
+        if not guid or guid == NULL_GUID:
             return None
         return self.gimbal_modifiers.get(guid)
 
 
-# Builder registry: (filename, builder_fn, uses_vehicles)
+# Builder registry: (filename, builder_fn)
 # All builders receive BuildContext as first arg
 BUILDERS = {
-    "vehicle_metadata":   ("vehicle_metadata.json",   build_vehicle_metadata,   True),
-    "vehicle_stats":      ("vehicle_stats.json",      build_vehicle_stats,      True),
-    "vehicle_hardpoints": ("vehicle_hardpoints.json", build_vehicle_hardpoints, True),
-    "vehicle_equipment":  ("vehicle_equipment.json",  build_vehicle_equipment,  False),
-    "fps_equipment":      ("fps_equipment.json",      build_fps_equipment,      False),
-    "resources":          ("resources.json",          build_resources,          False),
-    "blueprints":         ("blueprints.json",         build_blueprints,         False),
-    "missions":           ("missions.json",           build_missions,           False),
-    "factions":           ("factions.json",           build_factions,           False),
-    "standings":          ("standings.json",          build_standings,          False),
-    "localities":         ("localities.json",         build_localities,         False),
-    "tags":               ("tags.json",               build_tags,               False),
-    "mission_types":      ("mission_types.json",      build_mission_types,      False),
-    "scenarios":          ("scenarios.json",          build_scenarios,          False),
+    "vehicle_metadata":   ("vehicle_metadata.json",   build_vehicle_metadata),
+    "vehicle_stats":      ("vehicle_stats.json",      build_vehicle_stats),
+    "vehicle_hardpoints": ("vehicle_hardpoints.json", build_vehicle_hardpoints),
+    "vehicle_equipment":  ("vehicle_equipment.json",  build_vehicle_equipment),
+    "fps_equipment":      ("fps_equipment.json",      build_fps_equipment),
+    "resources":          ("resources.json",          build_resources),
+    "blueprints":         ("blueprints.json",         build_blueprints),
+    "missions":           ("missions.json",           build_missions),
+    "factions":           ("factions.json",           build_factions),
+    "standings":          ("standings.json",          build_standings),
+    "localities":         ("localities.json",         build_localities),
+    "tags":               ("tags.json",               build_tags),
+    "mission_types":      ("mission_types.json",      build_mission_types),
+    "scenarios":          ("scenarios.json",          build_scenarios),
 }
 
 
@@ -781,7 +781,7 @@ def run_extraction(config, args):
 
     build_counts = {}
     for category in categories:
-        filename, builder_fn, uses_vehicles = BUILDERS[category]
+        filename, builder_fn = BUILDERS[category]
         print(f"\n  Building {category}...")
         result = builder_fn(ctx)
 

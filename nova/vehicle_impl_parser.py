@@ -252,19 +252,6 @@ def _sum_structural_mass(elem):
     return total
 
 
-def _sum_mass_recursive(elem):
-    """Sum all mass attributes in a part tree (hull mass + sub-part masses)."""
-    total = safe_float(elem.get("mass", "0"))
-    for child in elem:
-        if child.tag == "Part":
-            total += _sum_mass_recursive(child)
-        elif child.tag == "Parts":
-            for sub in child:
-                if sub.tag == "Part":
-                    total += _sum_mass_recursive(sub)
-    return total
-
-
 def _collect_hull_hp(main_part):
     """Collect damageMax from structural parts for Hull stats.
 
