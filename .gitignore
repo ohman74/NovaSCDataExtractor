@@ -10,6 +10,9 @@ output/
 # Reference data (local comparison only)
 temp/
 
+# Extraction run logs (the historical ones committed in 764cf24 stay tracked)
+logs/
+
 # Python cache
 __pycache__/
 *.pyc
