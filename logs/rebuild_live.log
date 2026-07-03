@@ -1,0 +1,127 @@
+=== Nova Star Citizen Data Extractor v1.0.0 ===
+
+
+[MATRIX] Fetching RSI ship-matrix from https://robertsspaceindustries.com/ship-matrix/index...
+  Cached 247 ships -> D:\Claude\Nova SC Data Extractor\cache\rsi_flight_ready.json
+  (218 flight-ready, 29 in-concept)
+
+=== Channel: LIVE ===
+[OK] Tools already present
+
+Game version:  sc-alpha-4.8.0
+Build branch:  sc-alpha-4.8.0
+Build version: 4.8.180.28520
+P4 changelist: 11825000
+Data.p4k: D:\Games\Roberts Space Industries\StarCitizen\LIVE\Data.p4k
+Data.p4k size: 143.8 GB
+
+[1/3] Using cached extraction
+  DCB: D:\Claude\Nova SC Data Extractor\cache\LIVE\Data\Game2.dcb
+
+[2/5] Converting game.dcb to XML (this may take a while)...
+  Using cached: D:\Claude\Nova SC Data Extractor\cache\LIVE\Data\Game2.xml (1753 MB)
+  Found 920 spaceships entity files
+  Found 40 groundvehicles entity files
+  Found 0 CryXML-binary .xml files needing conversion
+
+[4/5] Converting 960 entity files...
+  960 already converted (cached)
+
+[PARSE] Parsing DataForge data...
+  Parsing D:\Claude\Nova SC Data Extractor\cache\LIVE\Data\Game2.xml...
+  File size: 1753 MB
+  This will take several minutes...
+  4,000,000 elements | 1972 entities | 1972 items | 0 vehicles | 0 mfrs | 0 ammo | 8s
+  8,000,000 elements | 7331 entities | 7217 items | 47 vehicles | 0 mfrs | 235 ammo | 16s
+  24,000,000 elements | 26907 entities | 26790 items | 47 vehicles | 0 mfrs | 235 ammo | 48s
+  32,000,000 elements | 28577 entities | 27496 items | 967 vehicles | 1124 mfrs | 235 ammo | 60s
+  36,000,000 elements | 28592 entities | 27511 items | 967 vehicles | 1124 mfrs | 235 ammo | 65s
+  Parse complete: 37,636,096 elements, 28592 entities, 1124 manufacturers, 235 ammo, 577 inventory in 66s
+  Items: 27511, Vehicles: 967, GUIDs: 29951
+  Caching parse results...
+  Done
+
+[PARSE] Parsing TagDatabase...
+  Loaded 18579 tags (cached)
+
+[PARSE] Parsing entity files...
+  Parsed 960 entity files, 957 weapon pool sizes, 920 shield pool sizes, 954 inclusion flags
+
+[PARSE] Loading localization...
+  Loaded 88992 translations
+
+[PARSE] Parsing vehicle implementations...
+  Parsed 139 vehicle implementations + 15 variants (0 failed)
+
+[PARSE] Classifying cosmetic-only ship variants...
+  Identified 354 cosmetic-only variants
+  Identified 705 variant-of-base mappings
+  Indexed interior storage for 453 ships
+
+[MATRIX] Loaded 247 ship-matrix entries.
+  Indexed reward sources for 679 blueprints
+
+[BUILD] Building 13 dataset(s)...
+
+  Building vehicle_metadata...
+  Built 279 ships
+  Built 41 ground vehicles
+  Wrote D:\Claude\Nova SC Data Extractor\output\LIVE\vehicle_metadata.json (279 items)
+
+  Building vehicle_stats...
+  Wrote D:\Claude\Nova SC Data Extractor\output\LIVE\vehicle_stats.json (279 items)
+
+  Building vehicle_hardpoints...
+  Wrote D:\Claude\Nova SC Data Extractor\output\LIVE\vehicle_hardpoints.json (279 items)
+
+  Building vehicle_equipment...
+  Built 3045 ship equipment items (129 cosmetic variants tagged)
+  Wrote D:\Claude\Nova SC Data Extractor\output\LIVE\vehicle_equipment.json (3045 items)
+
+  Building fps_equipment...
+  Built 393 FPS weapons (315 cosmetic variants tagged)
+  Built 118 FPS attachments (28 cosmetic variants tagged)
+  Wrote D:\Claude\Nova SC Data Extractor\output\LIVE\fps_equipment.json (511 items)
+
+  Building resources...
+  Wrote D:\Claude\Nova SC Data Extractor\output\LIVE\resources.json (37 items)
+
+  Building blueprints...
+  Wrote D:\Claude\Nova SC Data Extractor\output\LIVE\blueprints.json (1537 items)
+
+  Building missions...
+  Wrote D:\Claude\Nova SC Data Extractor\output\LIVE\missions.json (691 items)
+
+  Building factions...
+  Wrote D:\Claude\Nova SC Data Extractor\output\LIVE\factions.json (37 items)
+
+  Building standings...
+  Wrote D:\Claude\Nova SC Data Extractor\output\LIVE\standings.json (374 items)
+
+  Building localities...
+  Wrote D:\Claude\Nova SC Data Extractor\output\LIVE\localities.json (20 items)
+
+  Building tags...
+  Wrote D:\Claude\Nova SC Data Extractor\output\LIVE\tags.json (18579 items)
+
+  Building mission_types...
+  Wrote D:\Claude\Nova SC Data Extractor\output\LIVE\mission_types.json (40 items)
+
+=== Done! Total time: 191s ===
+Output: D:\Claude\Nova SC Data Extractor\output\LIVE
+  vehicle_metadata.json: 279 items
+  vehicle_stats.json: 279 items
+  vehicle_hardpoints.json: 279 items
+  vehicle_equipment.json: 3045 items
+  fps_equipment.json: 511 items
+  resources.json: 37 items
+  blueprints.json: 1537 items
+  missions.json: 691 items
+  factions.json: 37 items
+  standings.json: 374 items
+  localities.json: 20 items
+  tags.json: 18579 items
+  mission_types.json: 40 items
+
+[PACKAGE] Zipping LIVE output...
+  Packaged 14 files -> D:\Claude\Nova SC Data Extractor\output\LIVE.zip (3.4 MB)
