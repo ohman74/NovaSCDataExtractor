@@ -388,35 +388,47 @@ def _build_crafting_block(record, ctx):
     return {"Tiers": tiers_out}
 
 
+def _iter_trigger_explosions(components):
+    """Yield (trigger_type, trigger, explosion_params) for every
+    triggerable-devices trigger that carries an explosion behavior.
+
+    Handles both parser shapes: a trigger-type key maps to a single dict
+    when the XML has one trigger of that type, and to a LIST when it has
+    several (behr_gren_frag_01 has two Timer triggers — an arming timer
+    without behavior and a PreExplosion timer with one). CIG spells the
+    params key both `explosionParams` and `ExplosionParams` depending on
+    the component, so accept either casing.
+    """
+    triggerable = (components or {}).get("EntityComponentTriggerableDevicesParams") or {}
+    triggers = triggerable.get("triggers") or {}
+    if not isinstance(triggers, dict):
+        return
+    for trig_type, val in triggers.items():
+        entries = val if isinstance(val, list) else [val]
+        for trig in entries:
+            if not isinstance(trig, dict):
+                continue
+            behavior = trig.get("behavior") or {}
+            explosion = behavior.get("STriggerableDevicesBehaviorExplosionParams") or {}
+            if not isinstance(explosion, dict):
+                continue
+            exp_params = (explosion.get("explosionParams")
+                          or explosion.get("ExplosionParams") or {})
+            if isinstance(exp_params, dict) and exp_params:
+                yield trig_type, trig, exp_params
+
+
 def _get_grenade_damage_profile(components):
     """Walk EntityComponentTriggerableDevicesParams to extract grenade
     explosion damage. Returns dict matching `_get_fps_damage_profile`'s
     shape so the same classifier rules apply, or None when the grenade
     has no damage trigger (glowsticks, flares, smoke-only items).
-
-    Note: when a grenade has multiple triggers (e.g. Impact + Timer),
-    the current parser exposes only one — typically the most recent
-    by XML ordering. For the corpus today (Live = behr_gren_frag_01,
-    PTU = ksar_gren_frag_01) the Impact-only and Timer-only cases are
-    both correctly captured. Multi-trigger grenades may need a parser
-    extension if/when they appear with mixed damage profiles.
     """
-    triggerable = (components or {}).get("EntityComponentTriggerableDevicesParams") or {}
-    triggers = triggerable.get("triggers") or {}
-    if not isinstance(triggers, dict):
-        return None
-    # Triggers can be Timer-based or Impact-based; we just want the first
-    # explosion behavior we find.
+    # Triggers can be Timer/Impact/LaserTrip-based; we just want the first
+    # explosion behavior with a damage block.
     info = None
-    for trig_name, trig in triggers.items():
-        if not isinstance(trig, dict):
-            continue
-        behavior = trig.get("behavior") or {}
-        explosion = behavior.get("STriggerableDevicesBehaviorExplosionParams") or {}
-        if not isinstance(explosion, dict):
-            continue
-        explosion_params = explosion.get("explosionParams") or {}
-        damage_block = explosion_params.get("damage") or {}
+    for _trig_type, _trig, exp_params in _iter_trigger_explosions(components):
+        damage_block = exp_params.get("damage") or {}
         candidate = damage_block.get("DamageInfo")
         if isinstance(candidate, dict) and candidate:
             info = candidate
@@ -1100,29 +1112,45 @@ def build_std_item(record, ctx, external_loadout=None, nested=False):
     if bomb_params:
         si["Bomb"] = _build_bomb(bomb_params)
 
-    # Explosive for FPS grenades — from EntityComponentTriggerableDevicesParams
-    td = components.get("EntityComponentTriggerableDevicesParams")
-    if td and isinstance(td, dict):
-        triggers = td.get("triggers", {})
-        timer = triggers.get("STriggerableDevicesTriggerTimerParams") if isinstance(triggers, dict) else None
-        if isinstance(timer, dict):
-            behavior = timer.get("behavior", {})
-            explosion = behavior.get("STriggerableDevicesBehaviorExplosionParams") if isinstance(behavior, dict) else None
-            exp_params = explosion.get("ExplosionParams") if isinstance(explosion, dict) else None
-            if isinstance(exp_params, dict):
-                dmg_info = ((exp_params.get("damage") or {}).get("DamageInfo") or {})
-                damage = {}
-                for key in ["Physical", "Energy", "Distortion", "Thermal", "Biochemical", "Stun"]:
-                    v = safe_float(dmg_info.get(f"Damage{key}", 0))
-                    if v:
-                        damage[key] = v
-                si["Explosive"] = {
-                    "DetonationDelay": safe_float(timer.get("duration", 0)),
-                    "RadiusMin": safe_float(exp_params.get("minRadius", 0)),
-                    "RadiusMax": safe_float(exp_params.get("maxRadius", 0)),
-                    "Pressure": safe_float(exp_params.get("pressure", 0)),
-                    "Damage": damage,
-                }
+    # Explosive for FPS grenades / triggerable devices. Walk every trigger
+    # (dict- or list-form, either explosionParams casing) and take the
+    # first explosion behavior, preferring a Timer-carried one so
+    # DetonationDelay keeps REF's fuse semantics. With chained timers
+    # (arming + pre-explosion) the effective fuse is the sum of the chain
+    # through the carrying timer; impact/trip-carried explosions get 0.
+    explosion_hit = None
+    for hit in _iter_trigger_explosions(components):
+        if explosion_hit is None:
+            explosion_hit = hit
+        if "Timer" in hit[0]:
+            explosion_hit = hit
+            break
+    if explosion_hit:
+        trig_type, trig, exp_params = explosion_hit
+        delay = 0.0
+        if "Timer" in trig_type:
+            td = components.get("EntityComponentTriggerableDevicesParams") or {}
+            timers = (td.get("triggers") or {}).get(trig_type)
+            timer_list = timers if isinstance(timers, list) else [timers]
+            for t in timer_list:
+                if not isinstance(t, dict):
+                    continue
+                delay += safe_float(t.get("duration", 0))
+                if t is trig:
+                    break
+        dmg_info = ((exp_params.get("damage") or {}).get("DamageInfo") or {})
+        damage = {}
+        for key in ["Physical", "Energy", "Distortion", "Thermal", "Biochemical", "Stun"]:
+            v = safe_float(dmg_info.get(f"Damage{key}", 0))
+            if v:
+                damage[key] = v
+        si["Explosive"] = {
+            "DetonationDelay": round(delay, 2),
+            "RadiusMin": safe_float(exp_params.get("minRadius", 0)),
+            "RadiusMax": safe_float(exp_params.get("maxRadius", 0)),
+            "Pressure": safe_float(exp_params.get("pressure", 0)),
+            "Damage": damage,
+        }
 
     # MissilesController from SCItemMissileControllerParams
     mc_params = components.get("SCItemMissileControllerParams")

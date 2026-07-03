@@ -1082,33 +1082,28 @@ def _build_hull_stats(loadout_entries, ctx, impl, record=None):
         for e in entries:
             pn = e.get("portName", "")
             pn_lower = pn.lower()
-            cn = e.get("entityClassName", "")
-            if cn:
-                item = ctx.get_item(cn)
-                if item:
-                    health = item.get("components", {}).get("health", {})
-                    hp = health.get("health") if isinstance(health, dict) else None
-                    if hp:
-                        # Strip hardpoint_ prefix for the key
-                        key = pn[len("hardpoint_"):] if pn_lower.startswith("hardpoint_") else pn
-                        # Classify thruster port: Main/Retro/Maneuvering/VTOL (or Door)
-                        # Use the installed item's type (SCItemThrusterParams.thrusterType)
-                        # when available; fall back to port name heuristics.
-                        thruster_params = item.get("components", {}).get("SCItemThrusterParams", {})
-                        thruster_type = ""
-                        if isinstance(thruster_params, dict):
-                            thruster_type = (thruster_params.get("thrusterType", "") or "").lower()
-
-                        if thruster_type == "main" or ("engine" in pn_lower and "thruster" not in pn_lower):
-                            thrusters_hp["Main"][key] = float(hp)
-                        elif thruster_type == "retro" or "retro" in pn_lower:
-                            thrusters_hp["Retro"][key] = float(hp)
-                        elif thruster_type == "vtol" or "vtol" in pn_lower:
-                            thrusters_hp.setdefault("VTOL", {})[key] = float(hp)
-                        elif thruster_type == "maneuver" or ("thruster" in pn_lower and "vtol" not in pn_lower):
-                            thrusters_hp["Maneuvering"][key] = float(hp)
-                        elif pn_lower.startswith("hardpoint_door") or pn_lower.startswith("door_"):
-                            doors_hp[key] = float(hp)
+            entity_class, item = _resolve_entry(e, ctx)
+            if item:
+                health = item.get("components", {}).get("health", {})
+                hp = health.get("health") if isinstance(health, dict) else None
+                if hp:
+                    # Strip hardpoint_ prefix for the key
+                    key = pn[len("hardpoint_"):] if pn_lower.startswith("hardpoint_") else pn
+                    # Thruster membership: SCItemThrusterParams is present on
+                    # every thruster item; port-name hints cover items whose
+                    # component didn't parse. Role comes from the shared
+                    # name-first classifier (thrusterType is unreliable — see
+                    # _classify_thruster_role note).
+                    thruster_params = item.get("components", {}).get("SCItemThrusterParams", {})
+                    is_thruster = (
+                        (isinstance(thruster_params, dict) and bool(thruster_params))
+                        or "thruster" in pn_lower or "engine" in pn_lower
+                    )
+                    if is_thruster:
+                        role = _classify_thruster_role(pn, entity_class, vtol_label="VTOL")
+                        thrusters_hp.setdefault(role, {})[key] = float(hp)
+                    elif pn_lower.startswith("hardpoint_door") or pn_lower.startswith("door_"):
+                        doors_hp[key] = float(hp)
             for c in e.get("children", []):
                 _walk([c])
 
@@ -1144,6 +1139,11 @@ def _classify_thruster_role(port_name, class_name, vtol_label="VTOL"):
     if "retro" in pn or "_retro" in cn:
         return "Retro"
     if any(x in pn for x in ("main_thruster", "thruster_main", "mainthruster", "engine")):
+        return "Main"
+    # "_main" mid-name covers e.g. Redeemer's thruster_wing_bottom_main_left
+    # (thrusterType agrees: "main"); checked after vtol/retro so combined
+    # names keep their more specific role.
+    if "_main" in pn:
         return "Main"
     if "_main" in cn and "thruster" in cn:
         return "Main"
@@ -1478,7 +1478,7 @@ def _build_base_loadout_summary(hardpoints, ctx):
     for item in shields.get("InstalledItems", []):
         loadout = item.get("Loadout", "")
         if loadout:
-            shield_item = ctx.get_item(loadout)
+            shield_item = _item_for_loadout_token(ctx, loadout)
             if shield_item:
                 sp = shield_item.get("components", {}).get("shield", {})
                 total_shield_hp += safe_float(sp.get("maxShieldHealth", "0"))
@@ -1522,7 +1522,7 @@ def _compute_hardpoint_dps(hardpoint_entry, ctx):
     loadout = hardpoint_entry.get("Loadout", "")
     if not loadout:
         return 0.0
-    item = ctx.get_item(loadout)
+    item = _item_for_loadout_token(ctx, loadout)
     if not item:
         return 0.0
     comps = item.get("components", {})
@@ -1554,7 +1554,7 @@ def _compute_missile_damage(hardpoint_entry, ctx):
         loadout = sub.get("Loadout", "")
         if not loadout:
             continue
-        item = ctx.get_item(loadout)
+        item = _item_for_loadout_token(ctx, loadout)
         if not item:
             continue
         missile = item.get("components", {}).get("missile", {})
@@ -1712,13 +1712,9 @@ def _classify_port(port_name, item_type="", port_def=None, item_record=None,
     # for ports with this metadata.
     ctrl_tag = (port_def.get("controllableTags", "") or "").strip()
     ctrl_lower = ctrl_tag.lower()
-    PILOT_CTRL_TAGS = {
-        "pilotseat", "pilot_seat", "weaponpilot", "pilotseat_weapons",
-        "gunnose",  # ORIG ships' nose mount controlled by pilot
-        # Idris main railgun fired from a dedicated pilot-side console.
-        "mainweaponscontrol",
-    }
-    is_pilot_ctrl = ctrl_lower in PILOT_CTRL_TAGS
+    # Shared module-level set — keep _classify_port, the claims precompute
+    # and the RC enricher agreeing on what counts as pilot-controlled.
+    is_pilot_ctrl = ctrl_lower in _PILOT_CTRL_TAGS
 
     item_cn = ""
     # Weapon-rack detection: a rack item exposes one or more sub-ports
@@ -3039,13 +3035,29 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
 
 _GUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
-# Pilot ctrl_tags — module-level so both _categorize_port and the RC enricher
-# can reference the same set. The "gunNose" entry covers ORIG ships' nose
-# weapon controllers which are pilot-fired.
+# Pilot ctrl_tags — module-level so _classify_port, the claims precompute and
+# the RC enricher all share the same set. The "gunNose" entry covers ORIG
+# ships' nose weapon controllers which are pilot-fired;
+# "mainweaponscontrol" is the Idris main railgun's pilot-side console.
 _PILOT_CTRL_TAGS = frozenset({
     "pilotseat", "pilot_seat", "weaponpilot", "pilotseat_weapons",
-    "weapon_controller_pilot", "gunnose",
+    "weapon_controller_pilot", "gunnose", "mainweaponscontrol",
 })
+
+
+def _item_for_loadout_token(ctx, token):
+    """Resolve a hardpoint Loadout value to an item record.
+
+    Loadout mirrors the source XML form: className when the entry used
+    entityClassName, GUID when it used entityClassReference. Resolve
+    GUID-form tokens through the GUID index before the item lookup.
+    """
+    if not token:
+        return None
+    if _GUID_RE.match(token):
+        class_name = ctx.resolve_guid(token)
+        return ctx.get_item(class_name) if class_name else None
+    return ctx.get_item(token)
 
 
 def _enrich_remote_controllers(tree, loadout_entries, ctx, port_defs):

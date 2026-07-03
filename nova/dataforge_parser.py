@@ -164,7 +164,15 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
             "mission_scenarios": os.path.join(cache_dir, "parsed_mission_scenarios.json"),
         }
 
-        if all(os.path.isfile(f) for f in cache_files.values()):
+        cache_fresh = all(os.path.isfile(f) for f in cache_files.values())
+        # Guard against stale caches: a Game2.xml newer than any cache file
+        # means a new patch was extracted without clearing parsed_*.json.
+        if cache_fresh and xml_path and os.path.isfile(xml_path):
+            xml_mtime = os.path.getmtime(xml_path)
+            if any(os.path.getmtime(f) < xml_mtime for f in cache_files.values()):
+                print("  Cached parse results are older than Game2.xml — reparsing.")
+                cache_fresh = False
+        if cache_fresh:
             print("  Loading cached parse results...")
             data = {}
             for key, path in cache_files.items():
@@ -550,6 +558,7 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
             # One rank step within a reputation scope (e.g. "Neutral",
             # "Elite Contractor"). Referenced from contracts via
             # @minStanding / @maxStanding.
+            in_record = False
             guid = elem.get("__ref", "")
             tag = elem.tag
             cls = tag.split(".", 1)[1] if "." in tag else ""
@@ -727,6 +736,7 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
             # Self-closing record at Records/missiontype/**. The class-name
             # suffix is the canonical type ID (BountyHunter, Collection,
             # Hauling, …); LocalisedTypeName is the @LOC key.
+            in_record = False
             guid = elem.get("__ref", "")
             tag = elem.tag
             cls = tag.split(".", 1)[1] if "." in tag else ""
@@ -2668,8 +2678,18 @@ def _parse_item_port(elem):
                 types.append(f"{t}.{st}" if st and st != "UNDEFINED" else t)
         port["types"] = types
 
-    # Default loadout
+    # Default loadout. Scope the search to this port's own subtree minus
+    # nested sub-ports (elem.iter also descends into <Ports>, where the
+    # first hit would be a SUB-port's loadout entry misattributed to the
+    # parent when the parent itself has none).
+    nested_ports_elem = elem.find("Ports")
+    nested_entries = (
+        {id(e) for e in nested_ports_elem.iter("SItemPortLoadoutEntryParams")}
+        if nested_ports_elem is not None else set()
+    )
     for entry in elem.iter("SItemPortLoadoutEntryParams"):
+        if id(entry) in nested_entries:
+            continue
         cn = entry.get("entityClassName", "")
         ref = entry.get("entityClassReference", "")
         if cn:

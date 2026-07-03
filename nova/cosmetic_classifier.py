@@ -197,24 +197,41 @@ def _guid_index_for(items_db):
 
 
 def _loadout_ports(xml_path, items_db):
-    """Return {port_name: className} for the entity XML.
+    """Return {hierarchical_port_path: className} for the entity XML.
 
-    Resolves entityClassReference (GUID) to className via items_db so
-    that two ships with identical loadouts but mixed name/GUID refs
-    compare equal.
+    Keys are `parent/child` chains of itemPortName so identically-named
+    ports under different parents (e.g. `hardpoint_weapon_01` inside two
+    turrets) don't collide — a flat first-wins map hid functional swaps
+    on the second turret. Resolves entityClassReference (GUID) to
+    className via items_db so that two ships with identical loadouts but
+    mixed name/GUID refs compare equal.
     """
     guid_to_class = _guid_index_for(items_db)
     out = {}
-    for e in ET.parse(xml_path).getroot().iter("SItemPortLoadoutEntryParams"):
-        name = e.get("itemPortName", "")
-        if not name or name in out:
-            continue
+
+    def _resolve(e):
         cls = e.get("entityClassName", "")
         if not cls:
             ref = e.get("entityClassReference", "")
             if ref:
                 cls = guid_to_class.get(ref.lower(), ref)
-        out[name] = cls
+        return cls
+
+    def _walk(node, prefix):
+        for child in node:
+            if child.tag == "SItemPortLoadoutEntryParams":
+                name = child.get("itemPortName", "")
+                if name:
+                    key = f"{prefix}/{name}" if prefix else name
+                    if key not in out:
+                        out[key] = _resolve(child)
+                    _walk(child, key)
+                else:
+                    _walk(child, prefix)
+            else:
+                _walk(child, prefix)
+
+    _walk(ET.parse(xml_path).getroot(), "")
     return out
 
 

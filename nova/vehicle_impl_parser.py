@@ -39,7 +39,10 @@ def parse_vehicle_implementations(cache_dir):
                 results[name] = data
                 parsed += 1
         except Exception as e:
+            # _parse_vehicle_xml already returns None on ParseError, so
+            # anything landing here is unexpected — count it, but say so.
             failed += 1
+            print(f"  ! vehicle impl {filename}: {type(e).__name__}: {e}")
 
     # Variant overrides live in Modifications/<Variant>.xml — applied only
     # when the entity's VehicleComponentParams.modification field is set
@@ -63,8 +66,9 @@ def parse_vehicle_implementations(cache_dir):
                     if not data.get("name"):
                         data["name"] = variant_name
                     variant_overrides[variant_name] = data
-            except Exception:
+            except Exception as e:
                 failed += 1
+                print(f"  ! vehicle mod {filename}: {type(e).__name__}: {e}")
         print(f"  Parsed {parsed} vehicle implementations + {len(variant_overrides)} variants ({failed} failed)")
     else:
         print(f"  Parsed {parsed} vehicle implementations ({failed} failed)")
