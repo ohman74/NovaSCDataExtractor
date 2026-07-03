@@ -99,7 +99,7 @@ nova/
 
 ## Output files
 
-Thirteen JSON files in `output/<channel>/`, matching the documented reference shapes:
+Sixteen JSON datasets in `output/<channel>/` (plus `metadata.json`), matching the documented reference shapes:
 
 | File | Reference | Content |
 |------|-----------|---------|
@@ -109,13 +109,16 @@ Thirteen JSON files in `output/<channel>/`, matching the documented reference sh
 | `vehicle_equipment.json` | entry_3 | Ship/vehicle equipment stdItem records (~2868 items on current Live) |
 | `fps_equipment.json` | entry_4 | FPS weapons + attachments stdItem records (~496 items on current Live, includes cosmetic skin variants tagged inline) |
 | `resources.json` | — | Crafting resources keyed by GUID, referenced from `blueprints.json` slot `Costs[]` |
+| `mineables.json` | — | Mining physics per ore/raw material (instability, resistance, optimal window, explosion multiplier, cluster factor) from `MineableElement` records; `ResourceGUID` joins the resource GUID space |
 | `blueprints.json` | — | All ~1500 crafting recipes per target item, with `RewardSources[]` linking to `missions.json` |
 | `missions.json` | — | Contracts (and synthetic scenario-tier entries) that grant blueprints. References factions/standings/localities/tags by ClassName |
+| `mission_board.json` | — | Job-board mission catalog (`MissionBrokerEntry` records): localized title/description, type, giver, buy-in, instance limits, rewards, deadlines, reputation gates. Separate system from `missions.json` |
 | `factions.json` | — | FactionReputation catalog with localized DisplayName + HQ/Leadership/Area/Focus metadata |
 | `standings.json` | — | Reputation rank steps (Neutral/Friendly/Elite Contractor/…) with `MinReputation` thresholds |
 | `localities.json` | — | Region/sub-region records (Nyx, Pyro, Pyro_RegionA, …) |
 | `tags.json` | — | TagDatabase catalog (GUID-keyed object map). Used by `missions.json` `TagFilter` blocks |
 | `mission_types.json` | — | MissionType catalog (BountyHunter, Collection, Hauling, Mining, …). Referenced from `missions.json` by `MissionTypeClassName` |
+| `scenarios.json` | — | MissionScenario schedule/gating records (autoCreate, trackProgress, scheduleEnabled) referenced by contract prerequisites |
 
 Plus `metadata.json` with `gameVersion` (public patch format `<patch>.<p4_changelist>` like `4.7.2.11715810` derived from the RSI launcher log; falls back to the build-manifest `Branch` when the log isn't available), `buildBranch`, `buildVersion`, `p4Change`, `buildDate`, `channel`, and per-dataset counts.
 

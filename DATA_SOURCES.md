@@ -748,6 +748,18 @@ The conversion is idempotent — running the pipeline again after a fresh extrac
 
 ---
 
+## Explosive Block (grenades / triggerable devices)
+
+### Explosive
+- **Target**: `stdItem.Explosive`
+- **Source**: `EntityComponentTriggerableDevicesParams/triggers/<trigger type>/behavior/STriggerableDevicesBehaviorExplosionParams/explosionParams` (CIG spells the params key both `explosionParams` and `ExplosionParams`; trigger-type keys map to a single dict when the XML has one trigger of that type and to a LIST when it has several — e.g. behr_gren_frag_01 chains an arming timer without behavior and a PreExplosion timer with one)
+- **Parser**: Generic component capture
+- **Builder**: `stditem._iter_trigger_explosions()` + the Explosive block in `build_std_item`
+- **Transformation**: `DetonationDelay` (sum of the Timer-trigger chain durations through the explosion-carrying timer; 0 for impact/trip-carried explosions), `RadiusMin`/`RadiusMax`, `Pressure`, `Damage` (capitalized non-zero damage types). The first explosion behavior wins, preferring Timer-carried ones for REF fuse semantics.
+- **Note**: also feeds `Class` derivation for grenades via `_get_grenade_damage_profile` (same walker).
+
+---
+
 ## MissilesController Block
 
 ### MissilesController.LockAngleAtMin / LockAngleAtMax / MaxArmedMissiles / LaunchCooldownTime
@@ -995,6 +1007,18 @@ Sol-III Core (`nvy_flightsuit_light_core_01_0X_01`) is the *only* core-slot item
 ---
 
 ## Top-Level Records (Non-stdItem)
+
+### MineableElement (mineables.json)
+- **Target**: `mineables.json[]`
+- **Source**: `Libs/Foundry/Records/mining/mineableelements/*.xml` — one self-closing `MineableElement.<ClassName>` record per file with exactly 8 attributes: `resourceType` (GUID, same resource space as crafting costs / commodities), `elementInstability`, `elementResistance`, `elementOptimalWindowMidpoint(+Randomness)`, `elementOptimalWindowThinness`, `elementExplosionMultiplier`, `elementClusterFactor`
+- **Parser/Builder**: `builders/mineables.py` (reads the record XMLs directly; not part of the DCB streaming whitelist)
+- **Transformation**: Name via `items_commodities_<classname>` localization key (suffix-less key, then title-cased className as fallbacks). Negative Resistance/ExplosionMultiplier values occur in the data and are emitted as-is.
+
+### MissionBrokerEntry (mission_board.json)
+- **Target**: `mission_board.json[]`
+- **Source**: `Libs/Foundry/Records/missionbroker/**` (subdirs jobboard / pu_missioninvites / pu_missions / testmissions) — the job-board/subsumption mission system, distinct from the ContractGenerator system behind missions.json
+- **Parser/Builder**: `builders/mission_board.py` (reads the record XMLs directly). Reputation reward amounts resolve through `Libs/Foundry/Records/reputation/rewards/**` (`SReputationRewardAmount` records, read locally by the same builder)
+- **Transformation**: see the module docstring for the field map and the documented omissions (objectiveTokens, missionFlow, partialRewardPayout, non-scalar MissionProperty value types, scheduling knobs)
 
 ### SCItemManufacturer
 
