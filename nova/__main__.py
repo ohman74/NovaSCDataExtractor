@@ -40,8 +40,10 @@ from .builders.slices import (
     build_fps_equipment,
 )
 from .builders.resources import build_resources
+from .builders.mineables import build_mineables
 from .builders.blueprints import build_blueprints
 from .builders.missions import build_missions
+from .builders.mission_board import build_mission_board
 from .builders.factions import build_factions
 from .builders.standings import build_standings
 from .builders.localities import build_localities
@@ -242,8 +244,10 @@ BUILDERS = {
     "vehicle_equipment":  ("vehicle_equipment.json",  build_vehicle_equipment),
     "fps_equipment":      ("fps_equipment.json",      build_fps_equipment),
     "resources":          ("resources.json",          build_resources),
+    "mineables":          ("mineables.json",          build_mineables),
     "blueprints":         ("blueprints.json",         build_blueprints),
     "missions":           ("missions.json",           build_missions),
+    "mission_board":      ("mission_board.json",      build_mission_board),
     "factions":           ("factions.json",           build_factions),
     "standings":          ("standings.json",          build_standings),
     "localities":         ("localities.json",         build_localities),
