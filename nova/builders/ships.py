@@ -37,6 +37,11 @@ _AI_MISSION_PATTERNS = [
     "_Advocacy", "_Indestructible",
 ]
 
+# Trailing `_Test` / `_TEST` token marking a developer bench variant.
+# Case-insensitive because CIG spells it both ways (`_BMBRCK_S03_TEST` vs
+# `_Bomb_Test`). See `_is_ai_or_excluded_variant` for the structural audit.
+_DEV_TEST_TOKEN_RE = re.compile(r"_test(?:_|$)", re.IGNORECASE)
+
 
 def _is_ground_vehicle(vehicle):
     """Return True if the vehicle record represents a ground vehicle."""
@@ -235,6 +240,29 @@ def _is_ai_or_excluded_variant(class_name):
     # `Unmanned` encounters. Verified against Game2.xml: no structural diff
     # separates them from the base. Name suffix stays as last-resort.
     if cn.endswith("_Unmanned"):
+        return True
+
+    # Developer test rigs: `*_Test` / `*_TEST` trailing token
+    # (AEGS_Eclipse_BMBRCK_S03/S05/S10_TEST, ANVL_Gladiator_BMBRCK_S03/S05_TEST,
+    # BANU_Defender_Bomb_Test, RSI_Mantis_Bomb_Test). These are weapon/bomb-rack
+    # bench variants CIG uses to try alternate ordnance on an existing hull.
+    #
+    # Name-based by necessity. Structural attempt on 2026-08-01 against the
+    # 1105-record LIVE corpus: each rig is identical to its base record in
+    # every field the extractor can see — same `inclusionMode`
+    # ("ReadyToInclude" on both), same AttachDef (Type/SubType/Size/Grade/
+    # Tags/manufacturer), same entityTagGuids, same insurance block, same
+    # vehicleName, same vehicleDefinition, same component set, same
+    # SCItemPurchasableParams. The only gameplay delta is a swapped
+    # `defaultLoadout` entry (a BombRack item on a weapon hardpoint), which
+    # is not a dev-content signal — real bombers carry the same racks. No
+    # shop/spawn record in Game2.xml or the foundry records references them.
+    #
+    # `_test(_|$)` matches only a trailing/standalone token, so hypothetical
+    # future names like `*_Testbed` are not caught. Corpus check: 8 records
+    # match, the 7 above plus `SalvageableDebris_test` (already dropped by
+    # `_is_salvageable_debris`). No player-ownable ship matches.
+    if _DEV_TEST_TOKEN_RE.search(cn):
         return True
 
     return False
