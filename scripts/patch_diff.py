@@ -229,6 +229,18 @@ any_change = any(r[2] and not r[2].get("identical") for r in results)
 gen = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 pv, nv = mp["buildVersion"], mn["buildVersion"]
 
+# Channel labels. Same channel on both sides = a build-to-build patch diff;
+# different channels (e.g. LIVE vs PTU) = a cross-channel comparison, which
+# changes the wording and which .zip the footer points at.
+pc, nc = mp.get("channel", "LIVE"), mn.get("channel", "LIVE")
+cross = pc != nc
+prev_lab = f"{pc} build" if cross else "Previous build"
+new_lab = f"{nc} build" if cross else "New build"
+subtitle = (f"Star Citizen {pc} vs {nc} data extraction &ndash; what the two channels differ on."
+            if cross else
+            "Star Citizen LIVE data extraction &ndash; changes between two builds.")
+noun = "comparison" if cross else "patch"
+
 CSS = _CSS
 
 P = []
@@ -237,11 +249,11 @@ P.append(f'''<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>Nova SC data diff: {esc(pv)} &rarr; {esc(nv)}</title>
 <style>{CSS}</style></head><body><div class="wrap">
 <h1>Nova SC data diff</h1>
-<p class="sub">Star Citizen LIVE data extraction &ndash; changes between two builds. Generated {gen}.</p>
+<p class="sub">{subtitle} Generated {gen}.</p>
 <div class="hero">
-<div class="hcard"><div class="lab">Previous build</div><div class="big">{esc(pv)}</div>
+<div class="hcard"><div class="lab">{esc(prev_lab)}</div><div class="big">{esc(pv)}</div>
 <div class="muted" style="font-size:13px">game {esc(mp["gameVersion"])} &middot; {esc(mp["buildDate"])}</div></div>
-<div class="hcard"><div class="lab">New build <span class="arrow">&rarr;</span></div><div class="big">{esc(nv)}</div>
+<div class="hcard"><div class="lab">{esc(new_lab)} <span class="arrow">&rarr;</span></div><div class="big">{esc(nv)}</div>
 <div class="muted" style="font-size:13px">game {esc(mn["gameVersion"])} &middot; {esc(mn["buildDate"])}</div></div>
 </div>''')
 
@@ -256,7 +268,7 @@ if any_change:
 <span class="mod">{nmod} modified</span> records.</div>''')
 else:
     P.append(f'''<div class="verdict ok"><strong>No extracted-data changes.</strong> All {len(LABELS)} datasets are byte-identical
-between the two builds. This patch changed only engine/binary content, not any DataForge records Nova extracts
+between the two builds. This {noun} changed only engine/binary content, not any DataForge records Nova extracts
 (ships, items, missions, tags, factions, &hellip;). Only <code>metadata.json</code> differs, in its build-identification fields.</div>''')
 
 # summary table
@@ -301,6 +313,28 @@ for fname, lab, d in results:
             P.append(f'<li class="muted">&hellip; and {len(rows)-MAXL} more</li>')
         P.append('</ul>')
     if d["modified"]:
+        # Which fields moved, and on how many records. A field touched on most of
+        # the dataset is a system-wide rebalance rather than per-record tuning, and
+        # that reads far better here than in 200 individual before/after tables.
+        freq = {}
+        for _k, _n, ch, _t in d["modified"]:
+            for f_, _a, _b in ch:
+                # collapse list indices so Foo[3].Bar and Foo[7].Bar count together
+                gen = "".join(("[]" + p.split("]", 1)[1]) if "]" in p else "[" + p
+                              for p in f_.split("[")) if "[" in f_ else f_
+                freq[gen] = freq.get(gen, 0) + 1
+        top = sorted(freq.items(), key=lambda x: -x[1])[:12]
+        nmod = len(d["modified"])
+        P.append(f'<div class="dlab mod">Most-changed fields <span class="muted">'
+                 f'(of {nmod} modified record{"s" if nmod != 1 else ""})</span></div>')
+        P.append('<table class="mtab">')
+        for f_, n in top:
+            pct = 100.0 * n / nmod
+            P.append(f'<tr><td class="k"><code>{esc(f_)}</code></td>'
+                     f'<td class="num">{n}</td><td class="muted">{pct:.0f}% of modified</td></tr>')
+        if len(freq) > len(top):
+            P.append(f'<tr><td colspan="3" class="muted">&hellip; and {len(freq)-len(top)} more fields</td></tr>')
+        P.append('</table>')
         P.append(f'<div class="dlab mod">Modified ({len(d["modified"])})</div>')
         for k, name, ch, tot in d["modified"][:MAXL]:
             P.append(f'<div class="dl"><b>{esc(name)}</b> <code>{esc(k)}</code>'
@@ -317,14 +351,15 @@ for fname, lab, d in results:
     P.append('</div>')
 
 # footer note
-zipp = os.path.join(os.path.dirname(NEW.rstrip("/\\")), "LIVE.zip")
+zipp = os.path.join(os.path.dirname(NEW.rstrip("/\\")), f"{nc}.zip")
 zinfo = ""
 if os.path.exists(zipp):
     import zipfile
     z = zipfile.ZipFile(zipp)
     zinfo = f'{os.path.getsize(zipp)/1048576:.1f} MB, {len(z.namelist())} files'
-P.append(f'''<div class="note"><b>Verification.</b> Every dataset file was compared by SHA-256 hash against the pre-patch output.
-The regenerated <code>output/LIVE.zip</code> ({zinfo}) carries the new build identity: buildVersion
+baseline = f"the {pc} output" if cross else "the pre-patch output"
+P.append(f'''<div class="note"><b>Verification.</b> Every dataset file was compared by SHA-256 hash against {baseline}.
+The regenerated <code>output/{esc(nc)}.zip</code> ({zinfo}) carries the new build identity: buildVersion
 <code>{esc(pv)} &rarr; {esc(nv)}</code>, p4Change <code>{esc(mp["p4Change"])} &rarr; {esc(mn["p4Change"])}</code>,
 buildDate <code>{esc(mp["buildDate"])} &rarr; {esc(mn["buildDate"])}</code>.</div>''')
 P.append('</div></body></html>')
