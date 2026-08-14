@@ -62,16 +62,19 @@ def extract_all_xml_and_dcb(config):
     - All .xml files (entity definitions, configs, etc.)
     - All .dcb files (DataForge databases like Game2.dcb)
 
-    The "xml" filter does NOT cover ship-interior ObjectContainer
-    archives (.socpak), which are separate ZIP archives under
-    `Data/ObjectContainers/Ships/{MFR}/{Ship}/*.socpak`. These contain
-    the per-ship interior level data (room layouts, crew-locker
-    placements). Each ship entity XML references its socpak files via
-    `SVehicleObjectContainerParams.fileName`. Storage-locker counts for
-    Reclaimer / Retaliator / Valkyrie / Zeus / Constellation / Polaris
-    / 400i / Fortune / Starlifter / Starlancer / etc. live inside the
-    `*_editor.xml` member of each socpak. We extract that subtree as a
-    second pass.
+    The "xml" filter does NOT cover ObjectContainer archives (.socpak),
+    which are separate ZIP archives under `Data/ObjectContainers/`. We
+    extract that whole subtree as a second pass, for two consumers:
+
+    - `Ships/{MFR}/{Ship}/*.socpak` hold the per-ship interior level data
+      (room layouts, crew-locker placements). Each ship entity XML
+      references its socpak files via `SVehicleObjectContainerParams.fileName`.
+      Storage-locker counts for Reclaimer / Retaliator / Valkyrie / Zeus /
+      Constellation / Polaris / 400i / Fortune / Starlifter / Starlancer /
+      etc. live inside the `*_editor.xml` member of each socpak.
+    - `PU/...` holds the world location modules. Their `*.entxml` members
+      carry the placed loot containers, which is the only place the game
+      records *where* a loot slot preset is instantiated.
 
     This is much more efficient than multiple targeted extractions
     since the 143 GB archive only needs to be scanned once.
@@ -87,10 +90,10 @@ def extract_all_xml_and_dcb(config):
     if dcb_path:
         print("\n[1/3] Using cached extraction")
         print(f"  DCB: {dcb_path}")
-        # Even with cached DCB, ensure ship socpaks exist (they're
-        # extracted in a second pass, so a pre-2026-05 cache won't
-        # have them).
-        _ensure_ship_socpaks(config, cache_dir)
+        # Even with a cached DCB, ensure the socpaks exist (they're extracted
+        # in a second pass, so an older cache won't have them - and caches
+        # built before the full-ObjectContainers switch hold Ships only).
+        _ensure_object_container_socpaks(config, cache_dir)
         return dcb_path
 
     print("\n[1/3] Extracting XML and DCB files from Data.p4k...")
@@ -108,31 +111,46 @@ def extract_all_xml_and_dcb(config):
 
     print(f"  DCB found: {dcb_path} ({os.path.getsize(dcb_path) / (1024*1024):.0f} MB)")
 
-    _ensure_ship_socpaks(config, cache_dir)
+    _ensure_object_container_socpaks(config, cache_dir)
     return dcb_path
 
 
-def _ensure_ship_socpaks(config, cache_dir):
-    """Extract ship-interior ObjectContainer .socpak archives if missing.
+# Every .socpak in Data.p4k lives under Data/ObjectContainers (verified against
+# the p4k central directory: 9,614 archives, 4.7 GB total), so one filter pulls
+# the lot. Ships give interior storage placements; PU/ gives world locations and
+# the placed loot containers behind loot_locations.json.
+_MIN_EXPECTED_SOCPAKS = 5000
+
+
+def _ensure_object_container_socpaks(config, cache_dir):
+    """Extract ObjectContainer .socpak archives if missing.
 
     `Data/ObjectContainers/Ships/{MFR}/{Ship}/*.socpak` are the per-ship
     interior level packs that contain crew-locker / personal-storage
-    placements not present in the DataForge entity tree. The "xml" filter
-    in unp4k does not pull them, so we run a second targeted pass.
-    """
-    ships_dir = os.path.join(cache_dir, "Data", "ObjectContainers", "Ships")
-    if os.path.isdir(ships_dir):
-        existing = sum(1 for _, _, fs in os.walk(ships_dir) for f in fs if f.endswith(".socpak"))
-        if existing > 0:
-            return  # Already populated
+    placements not present in the DataForge entity tree.
+    `Data/ObjectContainers/PU/...` are the world location modules, which carry
+    the placed loot containers (`multiConfigRef` -> slot preset). The "xml"
+    filter in unp4k does not pull either, so we run a second targeted pass.
 
-    print("  Extracting ship-interior ObjectContainer archives...")
+    Older caches hold only the Ships subtree, so the guard counts archives
+    rather than testing for the directory.
+    """
+    oc_dir = os.path.join(cache_dir, "Data", "ObjectContainers")
+    if os.path.isdir(oc_dir):
+        existing = sum(1 for _, _, fs in os.walk(oc_dir) for f in fs if f.endswith(".socpak"))
+        if existing >= _MIN_EXPECTED_SOCPAKS:
+            return  # Already populated
+        if existing:
+            print(f"  ObjectContainer cache holds only {existing} socpaks "
+                  f"(expected >= {_MIN_EXPECTED_SOCPAKS}) - extracting the rest...")
+
+    print("  Extracting ObjectContainer archives (~4.7 GB)...")
     extract_files(
         config.unp4k_path,
         config.p4k_path,
-        "ObjectContainers/Ships",
+        "ObjectContainers",
         cache_dir,
-        timeout=600,
+        timeout=1800,
     )
 
 

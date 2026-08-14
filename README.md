@@ -99,7 +99,7 @@ nova/
 
 ## Output files
 
-Sixteen JSON datasets in `output/<channel>/` (plus `metadata.json`), matching the documented reference shapes:
+Seventeen JSON datasets in `output/<channel>/` (plus `metadata.json`), matching the documented reference shapes:
 
 | File | Reference | Content |
 |------|-----------|---------|
@@ -119,6 +119,7 @@ Sixteen JSON datasets in `output/<channel>/` (plus `metadata.json`), matching th
 | `tags.json` | — | TagDatabase catalog (GUID-keyed object map). Used by `missions.json` `TagFilter` blocks |
 | `mission_types.json` | — | MissionType catalog (BountyHunter, Collection, Hauling, Mining, …). Referenced from `missions.json` by `MissionTypeClassName` |
 | `scenarios.json` | — | MissionScenario schedule/gating records (autoCreate, trackProgress, scheduleEnabled) referenced by contract prerequisites |
+| `loot_locations.json` | - | Where each lootable item can drop: slot presets resolved to bodies/systems via socpak placements, plus `reachable` / `blockedBy` per item. Shops are out of scope. See `docs/loot_model.md` |
 
 Plus `metadata.json` with `gameVersion` (public patch format `<patch>.<p4_changelist>` like `4.7.2.11715810` derived from the RSI launcher log; falls back to the build-manifest `Branch` when the log isn't available), `buildBranch`, `buildVersion`, `p4Change`, `buildDate`, `channel`, and per-dataset counts.
 
