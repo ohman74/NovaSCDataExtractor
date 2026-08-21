@@ -5,7 +5,7 @@ import re
 
 from ..utils import safe_float, safe_int, resolve_name, NULL_GUID
 from ..vehicle_impl_parser import get_vehicle_impl_data
-from .stditem import _clean_description
+from .stditem import _clean_description, _firing_cadence
 
 # Movement classes that indicate ground vehicles (case-insensitive)
 _GROUND_MOVEMENT_CLASSES = {"arcadewheeled", "wheeled", "tracked"}
@@ -1583,7 +1583,16 @@ def _compute_hardpoint_dps(hardpoint_entry, ctx):
         return 0.0
 
     fm = weapon["firingModes"][0]
-    rpm = fm.get("fireRate", 0)
+    # Go through the shared cadence helper rather than reading `fireRate`
+    # off the mode. The nominal fireRate is not the weapon's effective rate
+    # for charged or sequence weapons, so reading it here left PilotBurstDPS
+    # contradicting the same weapon's own RoundsPerMinute on 25 weapons
+    # across 20 ships (Singe S3 overstated 4.8x, Whiptail understated 3x).
+    # Sustained rate, not burst_rpm: "burst DPS" here means damage while the
+    # trigger is held, as opposed to a sustained figure that would also
+    # account for capacitor drain and overheating.
+    rpm, _burst_rpm, _shot_count = _firing_cadence(
+        fm, fm.get("fireType", "single"), False)
     pellets = fm.get("pelletCount", 1) or 1
     if not rpm:
         return 0.0

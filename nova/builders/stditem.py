@@ -1586,6 +1586,147 @@ def _build_heat_controller_from_heat(heat):
     }
 
 
+def _firing_cadence(mode, fire_type, is_fps, shot_count=0):
+    """Effective cadence for one firing mode -> (rpm, burst_rpm, shot_count).
+
+    Single source of truth for firing rate. Both the stdItem weapon block
+    and the ship-level DPS rollup (builders/ships.py:_compute_hardpoint_dps)
+    call this, so RoundsPerMinute and PilotBurstDPS can never disagree.
+
+    The raw `fireRate` on a mode is NOT the weapon rate for charged or
+    sequence weapons. Reading it directly understates multi-barrel
+    repeaters (Whiptail STR-E2: 180 vs 540) and overstates every charged
+    cannon (Singe S3: 90 vs 18.9).
+    """
+    # Compute effective RPM for charged weapons.
+    # Default: cycle = chargeTime + max(cooldown, 60/inner_fireRate)
+    # Shotgun-pistol (charge adds pellets): cycle = ct + 1/(pellets × overchargedTime)
+    # (the pellet salvo recovery is governed by overchargedTime × pellet count).
+    rpm = float(mode.get("fireRate", 0))
+    if fire_type == "charged" and rpm > 0:
+        charge_time = mode.get("chargeTime", 0)
+        cooldown_time = mode.get("cooldownTime", 0)
+        cm = mode.get("chargeModifiers") or {}
+        cm_pellets = cm.get("pellets", 0) or 0
+        overcharged_time = mode.get("overchargedTime", 0) or 0
+        if charge_time:
+            if (cm_pellets > 0 and overcharged_time > 0 and is_fps):
+                total_pellets = (mode.get("pelletCount", 0) or 0) + cm_pellets
+                cycle_time = charge_time + 1.0 / (total_pellets * overcharged_time)
+            else:
+                fire_interval = 60.0 / rpm
+                cycle_time = charge_time + max(cooldown_time, fire_interval)
+            rpm = round(60.0 / cycle_time, 1) if cycle_time > 0 else rpm
+
+    # Sequence weapons: effective RPM derives from sequence entry timing.
+    # Per-entry time differs between ship and FPS weapons:
+    # - Ship: unit="Seconds" → entry_time = 60/inner + delay
+    # - FPS:  unit="Seconds" → entry_time = delay (as-is)
+    # - Both: unit="RPM" → entry_time = max(60/delay, 60/inner)
+    # FPS burst-inner sequences also add:
+    #   (shotCount-1)*60/inner  (burst duration, between first and last shot)
+    #   + innerCooldownTime     (post-burst recovery)
+    # Burst RPM = fastest instantaneous rate anywhere in the cycle
+    # (so consumers can compute burst DPS without the inter-burst pause).
+    # Only meaningful for true burst sequences (Sequence wrapper with
+    # mode="Looping"). Sequence wrappers with mode="Automatically" are
+    # single-shot weapons whose entries describe internal barrel cycling,
+    # not a burst pattern (Leonids Cannon) — burst_rpm stays = rpm there
+    # so we don't emit BurstRoundsPerMinute below.
+    burst_rpm = rpm
+    seq_mode = mode.get("sequenceMode", "")
+    if fire_type == "sequence" and rpm > 0:
+        seq_entries = mode.get("sequenceEntries") or []
+        if seq_entries:
+            shots_per_entry = max(mode.get("shotCount", 0) or 1, 1)
+            inner_fire_rate = rpm   # capture before we overwrite below
+            inner_interval = 60.0 / rpm
+            inner_cd = mode.get("innerCooldownTime", 0) or 0
+            total_cycle = 0.0
+            total_shots = 0
+            max_entry_rate = 0.0
+            has_mixed_units = len(set(e.get("unit", "") for e in seq_entries)) > 1
+            has_seconds = any(e.get("unit") == "Seconds" for e in seq_entries)
+            for e in seq_entries:
+                delay = e.get("delay", 0) or 0
+                unit = e.get("unit", "")
+                reps = max(e.get("repetitions", 1) or 1, 1)
+                if unit == "RPM" and delay > 0:
+                    if is_fps:
+                        entry_time = max(60.0 / delay, inner_interval)
+                    else:
+                        entry_time = 60.0 / delay
+                elif unit == "Seconds":
+                    entry_time = delay if is_fps else (inner_interval + delay)
+                else:
+                    entry_time = inner_interval
+                total_cycle += entry_time * reps
+                total_shots += shots_per_entry * reps
+                # Per-entry peak rate. When the mode fires multiple shots
+                # per entry (shotCount > 1), those shots cadence at the
+                # inner fireRate inside the entry — so the entry's burst
+                # rate is the inner rate, not 60/entry_time (which only
+                # describes how fast the entry itself recycles).
+                if shots_per_entry > 1:
+                    entry_rate = inner_fire_rate
+                elif entry_time > 0:
+                    entry_rate = 60.0 / entry_time
+                else:
+                    entry_rate = 0.0
+                if entry_rate > max_entry_rate:
+                    max_entry_rate = entry_rate
+            # FPS burst-inner sequences: add burst duration + inner cooldown
+            # (shotCount-1 intervals at inner rate, plus post-burst cooldown).
+            if is_fps and shots_per_entry > 1:
+                total_cycle += (shots_per_entry - 1) * inner_interval + inner_cd
+            if total_cycle > 0:
+                effective_rpm = total_shots * 60.0 / total_cycle
+                # Ship convention: uniform-RPM sequence caps at the
+                # PER-BARREL fireRate, not the weapon rate. Every
+                # multi-entry ship sequence drives one distinct barrel
+                # per entry (verified across all 137 sequence weapons:
+                # each SWeaponSequenceEntryParams carries its own
+                # fireHelper), and each barrel fires once per loop — so
+                # the weapon sustains up to n_barrels × inner fireRate.
+                # Capping at the raw inner rate understated multi-barrel
+                # weapons by up to 3x (Whiptail STR-E2: 180 vs 540; the
+                # BEHR SW16BR line: 500 vs 750-900). For single-entry
+                # sequences n_barrels == 1, so this is identical to the
+                # old weapon-level cap.
+                rpm_units = [e for e in seq_entries if e.get("unit") == "RPM"]
+                uniform_rpm = (len(rpm_units) == len(seq_entries)
+                               and len(set(e.get("delay") for e in rpm_units)) == 1)
+                barrel_cap = inner_fire_rate * len(seq_entries)
+                capped_uniform = (not is_fps and uniform_rpm
+                                  and effective_rpm > barrel_cap)
+                if capped_uniform:
+                    effective_rpm = barrel_cap
+                rpm = round(effective_rpm, 2)
+                # Burst RPM = peak instantaneous rate in the cycle (= the
+                # rate during the burst, before the long inter-burst gap).
+                # Only meaningful when the sequence actually loops; for
+                # mode="Automatically" the entries are barrel-cycling
+                # cooldowns for a single-shot weapon, so leave burst_rpm
+                # pinned to sustained. For uniform Looping sequences burst
+                # == sustained by definition; mirror the uniform cap so
+                # BurstRPM doesn't drift above the per-barrel cap.
+                if seq_mode == "Looping" and max_entry_rate > 0:
+                    burst_rpm = round(max_entry_rate, 2)
+                    if capped_uniform and burst_rpm > rpm:
+                        burst_rpm = rpm
+            # ShotPerAction / ShotPerSequence patterns:
+            # - Ship + mixed RPM rates → ShotPerAction (Meteor pattern)
+            # - FPS: already handled below based on unit mix / inner name
+            rpm_units = [e for e in seq_entries if e.get("unit") == "RPM"]
+            mixed_rates = (len(rpm_units) > 1
+                           and len(set(e.get("delay") for e in rpm_units)) > 1)
+            if not is_fps and len(seq_entries) > 1 and not shot_count and mixed_rates:
+                shot_count = total_shots
+            elif is_fps and len(seq_entries) > 1 and not shot_count and total_shots > 1:
+                shot_count = total_shots
+    return rpm, burst_rpm, shot_count
+
+
 def _build_weapon_data(components, ctx, item_type="", is_fps=False):
     """Build Weapon object with Ammunition, Firing modes, Consumption."""
     weapon = components.get("weapon", {})
@@ -1640,120 +1781,8 @@ def _build_weapon_data(components, ctx, item_type="", is_fps=False):
             if fire_type == "tractor":
                 fire_type = "tractorbeam"
 
-            # Compute effective RPM for charged weapons.
-            # Default: cycle = chargeTime + max(cooldown, 60/inner_fireRate)
-            # Shotgun-pistol (charge adds pellets): cycle = ct + 1/(pellets × overchargedTime)
-            # (the pellet salvo recovery is governed by overchargedTime × pellet count).
-            rpm = float(mode.get("fireRate", 0))
-            if fire_type == "charged" and rpm > 0:
-                charge_time = mode.get("chargeTime", 0)
-                cooldown_time = mode.get("cooldownTime", 0)
-                cm = mode.get("chargeModifiers") or {}
-                cm_pellets = cm.get("pellets", 0) or 0
-                overcharged_time = mode.get("overchargedTime", 0) or 0
-                if charge_time:
-                    if (cm_pellets > 0 and overcharged_time > 0 and is_fps):
-                        total_pellets = (mode.get("pelletCount", 0) or 0) + cm_pellets
-                        cycle_time = charge_time + 1.0 / (total_pellets * overcharged_time)
-                    else:
-                        fire_interval = 60.0 / rpm
-                        cycle_time = charge_time + max(cooldown_time, fire_interval)
-                    rpm = round(60.0 / cycle_time, 1) if cycle_time > 0 else rpm
-
-            # Sequence weapons: effective RPM derives from sequence entry timing.
-            # Per-entry time differs between ship and FPS weapons:
-            # - Ship: unit="Seconds" → entry_time = 60/inner + delay
-            # - FPS:  unit="Seconds" → entry_time = delay (as-is)
-            # - Both: unit="RPM" → entry_time = max(60/delay, 60/inner)
-            # FPS burst-inner sequences also add:
-            #   (shotCount-1)*60/inner  (burst duration, between first and last shot)
-            #   + innerCooldownTime     (post-burst recovery)
-            # Burst RPM = fastest instantaneous rate anywhere in the cycle
-            # (so consumers can compute burst DPS without the inter-burst pause).
-            # Only meaningful for true burst sequences (Sequence wrapper with
-            # mode="Looping"). Sequence wrappers with mode="Automatically" are
-            # single-shot weapons whose entries describe internal barrel cycling,
-            # not a burst pattern (Leonids Cannon) — burst_rpm stays = rpm there
-            # so we don't emit BurstRoundsPerMinute below.
-            burst_rpm = rpm
-            seq_mode = mode.get("sequenceMode", "")
-            if fire_type == "sequence" and rpm > 0:
-                seq_entries = mode.get("sequenceEntries") or []
-                if seq_entries:
-                    shots_per_entry = max(mode.get("shotCount", 0) or 1, 1)
-                    inner_fire_rate = rpm   # capture before we overwrite below
-                    inner_interval = 60.0 / rpm
-                    inner_cd = mode.get("innerCooldownTime", 0) or 0
-                    total_cycle = 0.0
-                    total_shots = 0
-                    max_entry_rate = 0.0
-                    has_mixed_units = len(set(e.get("unit", "") for e in seq_entries)) > 1
-                    has_seconds = any(e.get("unit") == "Seconds" for e in seq_entries)
-                    for e in seq_entries:
-                        delay = e.get("delay", 0) or 0
-                        unit = e.get("unit", "")
-                        reps = max(e.get("repetitions", 1) or 1, 1)
-                        if unit == "RPM" and delay > 0:
-                            if is_fps:
-                                entry_time = max(60.0 / delay, inner_interval)
-                            else:
-                                entry_time = 60.0 / delay
-                        elif unit == "Seconds":
-                            entry_time = delay if is_fps else (inner_interval + delay)
-                        else:
-                            entry_time = inner_interval
-                        total_cycle += entry_time * reps
-                        total_shots += shots_per_entry * reps
-                        # Per-entry peak rate. When the mode fires multiple shots
-                        # per entry (shotCount > 1), those shots cadence at the
-                        # inner fireRate inside the entry — so the entry's burst
-                        # rate is the inner rate, not 60/entry_time (which only
-                        # describes how fast the entry itself recycles).
-                        if shots_per_entry > 1:
-                            entry_rate = inner_fire_rate
-                        elif entry_time > 0:
-                            entry_rate = 60.0 / entry_time
-                        else:
-                            entry_rate = 0.0
-                        if entry_rate > max_entry_rate:
-                            max_entry_rate = entry_rate
-                    # FPS burst-inner sequences: add burst duration + inner cooldown
-                    # (shotCount-1 intervals at inner rate, plus post-burst cooldown).
-                    if is_fps and shots_per_entry > 1:
-                        total_cycle += (shots_per_entry - 1) * inner_interval + inner_cd
-                    if total_cycle > 0:
-                        effective_rpm = total_shots * 60.0 / total_cycle
-                        # Ship convention: uniform-RPM sequence caps at inner fireRate
-                        rpm_units = [e for e in seq_entries if e.get("unit") == "RPM"]
-                        uniform_rpm = (len(rpm_units) == len(seq_entries)
-                                       and len(set(e.get("delay") for e in rpm_units)) == 1)
-                        capped_uniform = (not is_fps and uniform_rpm
-                                          and effective_rpm > rpm)
-                        if capped_uniform:
-                            effective_rpm = rpm
-                        rpm = round(effective_rpm, 2)
-                        # Burst RPM = peak instantaneous rate in the cycle (= the
-                        # rate during the burst, before the long inter-burst gap).
-                        # Only meaningful when the sequence actually loops; for
-                        # mode="Automatically" the entries are barrel-cycling
-                        # cooldowns for a single-shot weapon, so leave burst_rpm
-                        # pinned to sustained. For uniform Looping sequences burst
-                        # == sustained by definition; mirror the uniform cap so
-                        # BurstRPM doesn't drift above the inner fireRate.
-                        if seq_mode == "Looping" and max_entry_rate > 0:
-                            burst_rpm = round(max_entry_rate, 2)
-                            if capped_uniform and burst_rpm > rpm:
-                                burst_rpm = rpm
-                    # ShotPerAction / ShotPerSequence patterns:
-                    # - Ship + mixed RPM rates → ShotPerAction (Meteor pattern)
-                    # - FPS: already handled below based on unit mix / inner name
-                    rpm_units = [e for e in seq_entries if e.get("unit") == "RPM"]
-                    mixed_rates = (len(rpm_units) > 1
-                                   and len(set(e.get("delay") for e in rpm_units)) > 1)
-                    if not is_fps and len(seq_entries) > 1 and not shot_count and mixed_rates:
-                        shot_count = total_shots
-                    elif is_fps and len(seq_entries) > 1 and not shot_count and total_shots > 1:
-                        shot_count = total_shots
+            rpm, burst_rpm, shot_count = _firing_cadence(
+                mode, fire_type, is_fps, shot_count)
 
             # Default AmmoPerShot / PelletsPerShot: 0 for beam/tractor, 1 for single/rapid/burst
             default_shots = 0 if is_beam_like else 1
