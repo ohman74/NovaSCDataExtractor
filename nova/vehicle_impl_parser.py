@@ -169,9 +169,10 @@ def _extract_vehicle_data(root, destroy_groups=None):
         result["groundDynamics"] = physics
 
     # Inline <Modifications> at the root carry per-variant overrides keyed
-    # by name (Zeus_CL, F7C_Mk2, ...). Each Modification has Elems whose
-    # idRef targets a Part by id — we record the (idRef, attr, value)
-    # triples so callers can apply them on the port tree per variant.
+    # by name (Zeus_CL, F7C_Mk2, ...). Each Modification names the patch
+    # file it layers on top of, and carries Elems whose idRef targets a
+    # Part by id, so we record both the patchFile and the (idRef, attr,
+    # value) triples for callers to resolve per variant.
     inline_mods = _extract_inline_modifications(root)
     if inline_mods:
         result["inlineModifications"] = inline_mods
@@ -180,11 +181,22 @@ def _extract_vehicle_data(root, destroy_groups=None):
 
 
 def _extract_inline_modifications(root):
-    """Return {variant_name: [{idRef, name, value}, ...]} for inline mods.
+    """Return {variant_name: {patchFile, elems}} for inline mods.
 
     Modifications elements appear directly under the Vehicle root and group
-    one or more `<Modification name="...">` blocks, each containing
+    one or more `<Modification name="...">` blocks, each optionally naming
+    a `patchFile` and containing
     `<Elems><Elem idRef="..." name="..." value="..." /></Elems>` overrides.
+
+    `patchFile` is the explicit link from a variant name to the
+    Modifications/ file that rewrites the part tree for it, e.g.
+
+        <Modification name="F7CM_Heartseeker"
+                      patchFile="Modifications/ANVL_Hornet_F7CM">
+
+    Several variants can share one patch file (the Heartseeker is an F7CM
+    with different turrets and paint), which is why the file cannot be
+    found by matching the entity class name against the filename.
     """
     mods_elem = root.find("Modifications")
     if mods_elem is None:
@@ -194,6 +206,7 @@ def _extract_inline_modifications(root):
         name = mod.get("name", "")
         if not name:
             continue
+        patch_file = mod.get("patchFile", "") or ""
         elems = []
         # Both <Elems><Elem .../></Elems> and direct <Elem .../> are seen.
         for child in list(mod):
@@ -210,8 +223,8 @@ def _extract_inline_modifications(root):
                     "name": child.get("name", ""),
                     "value": child.get("value", ""),
                 })
-        if elems:
-            out[name] = elems
+        if elems or patch_file:
+            out[name] = {"patchFile": patch_file, "elems": elems}
     return out or None
 
 
@@ -614,18 +627,24 @@ def get_vehicle_impl_data(vehicle_impls, vehicle_definition, class_name,
                           modification=None):
     """Look up vehicle implementation data by vehicleDefinition path or className.
 
-    Resolution order (gated on the entity's `modification` field — the
-    structural signal of intent to use a variant override):
-    1. If `modification` is non-empty AND a Modifications/<className>.xml
-       override exists keyed by className → use that override.
-       (Sentinel, Hoplite, F7CM, Mustang Beta/Gamma/..., Cyclone variants.)
-    2. Otherwise, resolve the base impl by vehicleDefinition basename,
-       falling back to className. (Stinger, F7CM_Mk2 — entities whose
-       vehicleDefinition points at their own impl file.)
-    3. If `modification` is non-empty and the resolved impl carries an
-       inline `<Modification name="X">` block → apply its elem overrides
-       to the port tree. (F7C_Mk2/F7CR_Mk2/F7CS_Mk2 layered on F7A.xml;
-       Zeus CL/MR/ST layered on RSI_Zeus.xml.)
+    Resolution order (the variant steps are gated on the entity's
+    `modification` field, the structural signal of intent to use one):
+    1. Base impl by vehicleDefinition basename, falling back to className.
+       This is the authoritative pointer and also the document that
+       declares what each variant name means.
+    2. Variant override, taken from the base impl's inline
+       `<Modification name="X" patchFile="Modifications/Y">`: the patch
+       file named there is the ship's real part tree. Several variants
+       routinely share one patch file (F7CM, F7CM_Heartseeker, CalMason
+       and F7CM_SQ42 all patch from ANVL_Hornet_F7CM), so the file cannot
+       be found by matching the entity class name.
+       When the Modification declares no patchFile, or it points at a file
+       this build does not ship, fall back to a Modifications/ file named
+       after the entity class, then to the base impl untouched.
+    3. Apply that same Modification's `<Elems>` on top, which is how the
+       game layers per-variant attribute tweaks over the patched tree.
+       (F7C_Mk2/F7CR_Mk2/F7CS_Mk2 layered on F7A.xml; Zeus CL/MR/ST
+       layered on RSI_Zeus.xml.)
 
     Lookup is case-insensitive because vehicleDefinition paths from the
     game data are lowercase while impl filenames use proper casing
@@ -651,36 +670,58 @@ def get_vehicle_impl_data(vehicle_impls, vehicle_definition, class_name,
         orig = idx.get(key.lower())
         return vehicle_impls.get(orig) if orig else None
 
-    # 1. Variant override — only when modification is set. Modifications/
-    #    files keyed by className (AEGS_Vanguard_Sentinel etc.) take
-    #    precedence over the base impl pointed at by vehicleDefinition.
-    data = None
-    if modification:
-        overrides = vehicle_impls.get("__variant_overrides__") or {}
-        override_idx = vehicle_impls.get("__variant_overrides_lower__")
-        if override_idx is None:
-            override_idx = {k.lower(): k for k in overrides.keys()}
-            vehicle_impls["__variant_overrides_lower__"] = override_idx
-        orig = override_idx.get(class_name.lower())
-        if orig:
-            data = overrides.get(orig)
+    overrides = vehicle_impls.get("__variant_overrides__") or {}
+    override_idx = vehicle_impls.get("__variant_overrides_lower__")
+    if override_idx is None:
+        override_idx = {k.lower(): k for k in overrides.keys()}
+        vehicle_impls["__variant_overrides_lower__"] = override_idx
 
-    # 2. Base impl lookup by vehicleDefinition (authoritative path), then
+    def _override(key):
+        orig = override_idx.get((key or "").lower()) if key else None
+        return overrides.get(orig) if orig else None
+
+    # 1. Base impl by vehicleDefinition (authoritative path), then
     #    className as fallback for entities whose vehicleDefinition is
     #    missing or stale.
-    if data is None and vehicle_definition:
+    data = None
+    if vehicle_definition:
         basename = os.path.splitext(os.path.basename(vehicle_definition))[0]
         data = _get(basename)
     if data is None:
         data = _get(class_name)
+
+    # The base impl is what declares the variant, so read the Modification
+    # block from there rather than from whatever we end up returning.
+    mod_entry = None
+    if modification and data:
+        mod_entry = (data.get("inlineModifications") or {}).get(modification)
+
+    # 2. Variant override. patchFile is the explicit link and wins; the
+    #    className-keyed filename match is the weaker fallback for
+    #    Modification blocks that declare no patch file.
+    if modification:
+        variant = None
+        patch_file = mod_entry.get("patchFile") if mod_entry else ""
+        if patch_file:
+            stem = os.path.splitext(
+                os.path.basename(patch_file.replace("\\", "/")))[0]
+            variant = _override(stem)
+        if variant is None:
+            variant = _override(class_name)
+        if variant is not None:
+            data = variant
+
     if data is None:
         return None
 
-    # 3. Apply inline modification (Zeus_CL, F7C_Mk2, ...).
-    if modification and data.get("inlineModifications"):
-        elems = data["inlineModifications"].get(modification)
-        if elems:
-            data = _apply_inline_modification(data, elems)
+    # 3. Apply the variant's inline Elems (Zeus_CL, F7C_Mk2, ...) on top of
+    #    whatever tree step 2 settled on.
+    elems = mod_entry.get("elems") if mod_entry else None
+    if not elems and modification:
+        own = (data.get("inlineModifications") or {}).get(modification)
+        elems = own.get("elems") if own else None
+    if elems:
+        data = _apply_inline_modification(data, elems)
     return data
 
 
