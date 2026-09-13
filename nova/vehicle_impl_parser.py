@@ -112,11 +112,13 @@ def _parse_modification_xml(filepath, registry=None):
     main_part = parts_elem.find("Part")
     if main_part is None:
         return None
+    structural = _collect_structural_parts(main_part, groups)
     return {
         "name": "",
         "ports": _parse_parts_recursive(main_part),
-        "mass": _sum_structural_mass(main_part),
-        "hullHP": _collect_hull_hp(main_part, groups),
+        "structuralParts": structural,
+        "mass": _mass_from_parts(structural),
+        "hullHP": _hull_hp_from_parts(structural),
     }
 
 
@@ -156,11 +158,13 @@ def _extract_vehicle_data(root, destroy_groups=None):
     if parts_elem is not None:
         main_part = parts_elem.find("Part")
         if main_part is not None:
-            # Mass: sum all structural part masses (excluding ItemPort and MassBox)
-            result["mass"] = _sum_structural_mass(main_part)
+            # One walk of the structural tree feeds both mass and hull HP,
+            # and keeps the part ids that inline <Elem> overrides target.
+            structural = _collect_structural_parts(main_part, destroy_groups)
+            result["structuralParts"] = structural
+            result["mass"] = _mass_from_parts(structural)
             result["ports"] = _parse_parts_recursive(main_part)
-            # Hull HP: structural part damageMax values + thruster HP
-            result["hullHP"] = _collect_hull_hp(main_part, destroy_groups)
+            result["hullHP"] = _hull_hp_from_parts(structural)
 
     # Wheeled / tracked ground-vehicle dynamics (PhysicalWheeled or PhysicalTracked).
     # Used for SteerCharacteristics + TrackSteerCharacteristics + TrackWheeledCharacteristics.
@@ -262,23 +266,6 @@ def _collect_ground_vehicle_dynamics(root):
     return out if out else None
 
 
-def _sum_structural_mass(elem):
-    """Sum mass of all structural parts (excluding ItemPort and MassBox)."""
-    part_class = elem.get("class", "")
-    if part_class in ("ItemPort", "MassBox"):
-        return 0
-
-    total = safe_float(elem.get("mass", "0"))
-    for child in elem:
-        if child.tag == "Part":
-            total += _sum_structural_mass(child)
-        elif child.tag == "Parts":
-            for sub in child:
-                if sub.tag == "Part":
-                    total += _sum_structural_mass(sub)
-    return total
-
-
 class _DestroyGroupRegistry:
     """Corpus-wide record of which DamagesGroup names destroy the vehicle.
 
@@ -363,46 +350,84 @@ def _part_is_vital(part_elem, destroy_groups):
     return False
 
 
-def _collect_hull_hp(main_part, destroy_groups=()):
-    """Collect damageMax from structural parts for Hull stats.
+def _collect_structural_parts(main_part, destroy_groups=()):
+    """Flat list of every structural part, main_part first.
 
     Only includes structural parts (AnimatedJoint, Animated, etc.) and
     skips ItemPort and MassBox parts (those are swappable components, not
     hull).
 
-    Returns flat dict: {VitalParts: {name: hp}, Parts: {name: hp}}
-    VitalParts = parts whose destruction triggers a damage group that
-    destroys the vehicle (see _part_is_vital), at any depth in the tree:
-    the Hornet F7A wires nose and tail while both hang off Body.
-    Parts = everything else with damageMax.
+    Keeping each part's `id` alongside its mass and damageMax is what lets
+    a variant's inline overrides reach the hull. Those elems target Parts
+    by id:
+
+        <Elem idRef="modPart_body" name="damageMax" value="700" />
+
+    and the parsed port tree they would otherwise be applied to does not
+    contain Parts at all, so they used to be dropped on the floor. Across
+    the impls that is 205 damageMax, 70 mass and 42 name overrides.
+
+    `vital` records whether destroying the part destroys the vehicle (see
+    _part_is_vital). No elem rewires damage behaviors, so it is read from
+    the XML once and survives any override.
     """
-    vital_parts = {}
-    parts = {}
+    parts = []
+
+    def _add(elem, root=False):
+        entry = {
+            "id": elem.get("id", ""),
+            "name": elem.get("name", ""),
+            "mass": safe_float(elem.get("mass", "0")),
+            "damageMax": safe_float(elem.get("damageMax", "0")),
+            "vital": _part_is_vital(elem, destroy_groups),
+        }
+        if root:
+            # The hull root carries the ship's own mass but is not itself
+            # one of the hull parts the Hull stats enumerate.
+            entry["root"] = True
+        parts.append(entry)
 
     def _walk(elem):
         for child in elem:
             if child.tag == "Part":
-                part_class = child.get("class", "")
-                if part_class in ("ItemPort", "MassBox"):
+                if child.get("class", "") in ("ItemPort", "MassBox"):
                     continue
-                name = child.get("name", "")
-                dmg_max = safe_float(child.get("damageMax", "0"))
-                if dmg_max:
-                    if _part_is_vital(child, destroy_groups):
-                        vital_parts[name] = dmg_max
-                    else:
-                        parts[name] = dmg_max
+                _add(child)
                 _walk(child)
             elif child.tag == "Parts":
                 _walk(child)
 
+    _add(main_part, root=True)
     _walk(main_part)
+    return parts
+
+
+def _mass_from_parts(parts):
+    """Hull mass: the sum over every structural part, root included."""
+    return sum(p["mass"] for p in parts)
+
+
+def _hull_hp_from_parts(parts):
+    """Build {VitalParts: {name: hp}, Parts: {name: hp}} from the part list.
+
+    VitalParts = parts whose destruction triggers a damage group that
+    destroys the vehicle, at any depth in the tree: the Hornet F7A wires
+    nose and tail while both hang off Body.
+    Parts = everything else with damageMax.
+    """
+    vital_parts = {}
+    other = {}
+    for part in parts:
+        if part.get("root") or not part["damageMax"]:
+            continue
+        target = vital_parts if part["vital"] else other
+        target[part["name"]] = part["damageMax"]
 
     result = {}
     if vital_parts:
         result["VitalParts"] = vital_parts
-    if parts:
-        result["Parts"] = parts
+    if other:
+        result["Parts"] = other
     return result if result else None
 
 
@@ -726,11 +751,16 @@ def get_vehicle_impl_data(vehicle_impls, vehicle_definition, class_name,
 
 
 def _apply_inline_modification(impl_data, elems):
-    """Return a copy of impl_data with `elems` applied to the port tree.
+    """Return a copy of impl_data with `elems` applied.
 
-    Each elem has {idRef, name, value}. Walks the port tree, finds every
-    port whose `id` matches `idRef`, and overrides the named attribute.
-    Special-cases skipPart so "0" clears the flag and "1" sets it.
+    Each elem has {idRef, name, value}. An id addresses either an ItemPort
+    or a structural Part, so both trees are indexed and each elem lands
+    wherever its id actually lives. Port elems override the named
+    attribute, with skipPart special-cased so "0" clears the flag and "1"
+    sets it. Part elems override mass, damageMax or name, after which hull
+    mass and Hull HP are recomputed from the patched list. The ORIG 350r
+    is the shape of it: its Modification skips six flair ports and pulls
+    body and tail down to 700 damageMax in the same block.
 
     The same id can appear at multiple positions in the parsed port tree
     (the recursive parser duplicates Parts nodes that sit inside
@@ -741,6 +771,10 @@ def _apply_inline_modification(impl_data, elems):
     new_data = copy.deepcopy(impl_data)
 
     ports_by_id = {}
+    parts_by_id = {}
+    for part in new_data.get("structuralParts") or []:
+        if part.get("id"):
+            parts_by_id.setdefault(part["id"], []).append(part)
 
     def _index(ports):
         for p in ports:
@@ -752,10 +786,29 @@ def _apply_inline_modification(impl_data, elems):
 
     _index(new_data.get("ports") or [])
 
+    hull_touched = False
     for elem in elems:
         idref = elem.get("idRef") or ""
         attr = elem.get("name") or ""
         value = elem.get("value") or ""
+        for part in parts_by_id.get(idref) or ():
+            if attr in ("mass", "damageMax"):
+                # safe_float turns an unparseable value into 0.0, which
+                # here would silently erase a real hull number. The data
+                # does carry one such value (the Gladius Valiant asks for
+                # a mass of "501.51" with a stray direction mark and an
+                # S glued on), so leave the part alone rather than zero it.
+                try:
+                    part[attr] = float(value)
+                except (TypeError, ValueError):
+                    continue
+            elif attr == "name":
+                part["name"] = value
+            else:
+                # Every other attr on a Part (Delay, filename, ...) is
+                # outside what the Hull stats are built from.
+                continue
+            hull_touched = True
         targets = ports_by_id.get(idref) or []
         for port in targets:
             if attr == "skipPart":
@@ -771,5 +824,10 @@ def _apply_inline_modification(impl_data, elems):
                 # Generic pass-through for `name`, `flags`, etc. The port dict
                 # uses the same key names as the impl XML attributes.
                 port[attr] = value
+
+    if hull_touched:
+        structural = new_data["structuralParts"]
+        new_data["mass"] = _mass_from_parts(structural)
+        new_data["hullHP"] = _hull_hp_from_parts(structural)
 
     return new_data
