@@ -29,11 +29,15 @@ def parse_vehicle_implementations(cache_dir):
     files = [f for f in os.listdir(veh_dir) if f.endswith(".xml")]
     parsed = 0
     failed = 0
+    # Filled in while parsing the base impls, then consulted by the
+    # parts-only Modifications files, which inherit their DamagesGroups
+    # from whichever base they override.
+    destroy_groups = _DestroyGroupRegistry()
 
     for filename in files:
         filepath = os.path.join(veh_dir, filename)
         try:
-            data = _parse_vehicle_xml(filepath)
+            data = _parse_vehicle_xml(filepath, destroy_groups)
             if data:
                 name = data.get("name", os.path.splitext(filename)[0])
                 results[name] = data
@@ -61,7 +65,7 @@ def parse_vehicle_implementations(cache_dir):
             variant_name = os.path.splitext(filename)[0]
             filepath = os.path.join(mod_dir, filename)
             try:
-                data = _parse_modification_xml(filepath)
+                data = _parse_modification_xml(filepath, destroy_groups)
                 if data:
                     if not data.get("name"):
                         data["name"] = variant_name
@@ -78,7 +82,7 @@ def parse_vehicle_implementations(cache_dir):
     return results
 
 
-def _parse_modification_xml(filepath):
+def _parse_modification_xml(filepath, registry=None):
     """Parse a Modifications/<Variant>.xml file.
 
     Two structures occur:
@@ -96,9 +100,12 @@ def _parse_modification_xml(filepath):
         return None
     if root.tag != "Modifications":
         return None
+    # A variant file may carry its own <Damages> override (Sentinel,
+    # Hoplite) but usually inherits the base's groups, so union both.
+    groups = _destroy_groups(root, registry)
     veh = root.find("Vehicle")
     if veh is not None:
-        return _extract_vehicle_data(veh)
+        return _extract_vehicle_data(veh, groups)
     parts_elem = root.find("Parts")
     if parts_elem is None:
         return None
@@ -109,11 +116,11 @@ def _parse_modification_xml(filepath):
         "name": "",
         "ports": _parse_parts_recursive(main_part),
         "mass": _sum_structural_mass(main_part),
-        "hullHP": _collect_hull_hp(main_part),
+        "hullHP": _collect_hull_hp(main_part, groups),
     }
 
 
-def _parse_vehicle_xml(filepath):
+def _parse_vehicle_xml(filepath, registry=None):
     """Parse a single vehicle implementation XML."""
     try:
         tree = ET.parse(filepath)
@@ -124,11 +131,18 @@ def _parse_vehicle_xml(filepath):
     if root.tag != "Vehicle":
         return None
 
-    return _extract_vehicle_data(root)
+    # Base impls define every damage group they reference, so their own
+    # <Damages> block is authoritative; the registry only collects them
+    # for the variant files parsed afterwards.
+    if registry is not None:
+        registry.observe(root)
+    return _extract_vehicle_data(root, _destroy_groups(root))
 
 
-def _extract_vehicle_data(root):
+def _extract_vehicle_data(root, destroy_groups=None):
     """Extract vehicle metadata + ports from a <Vehicle> element."""
+    if destroy_groups is None:
+        destroy_groups = _destroy_groups(root)
     result = {
         "name": root.get("name", ""),
         "displayName": root.get("displayname", ""),
@@ -146,7 +160,7 @@ def _extract_vehicle_data(root):
             result["mass"] = _sum_structural_mass(main_part)
             result["ports"] = _parse_parts_recursive(main_part)
             # Hull HP: structural part damageMax values + thruster HP
-            result["hullHP"] = _collect_hull_hp(main_part)
+            result["hullHP"] = _collect_hull_hp(main_part, destroy_groups)
 
     # Wheeled / tracked ground-vehicle dynamics (PhysicalWheeled or PhysicalTracked).
     # Used for SteerCharacteristics + TrackSteerCharacteristics + TrackWheeledCharacteristics.
@@ -252,21 +266,107 @@ def _sum_structural_mass(elem):
     return total
 
 
-def _collect_hull_hp(main_part):
+class _DestroyGroupRegistry:
+    """Corpus-wide record of which DamagesGroup names destroy the vehicle.
+
+    Parts-only `Modifications/<Variant>.xml` files redefine the part tree
+    (including each part's `<DamageBehavior class="Group">` wiring) but
+    inherit `<Damages><DamagesGroups>` from the base impl, and carry no
+    pointer back to it. So we accumulate group definitions while parsing
+    the base impls (which are always self-contained) and let the variant
+    files resolve their group references against that.
+
+    A name only counts when every definition of it in the corpus carries a
+    `class="Destroy"` behavior, so a name reused for something else
+    somewhere cannot leak into a variant that never meant it.
+    """
+
+    def __init__(self):
+        self._destroy = set()
+        self._other = set()
+
+    def observe(self, root):
+        """Record every DamagesGroup defined in this document."""
+        for name, is_destroy in _damage_group_classes(root).items():
+            (self._destroy if is_destroy else self._other).add(name)
+
+    def unambiguous(self):
+        """Group names that mean "destroy the vehicle" everywhere."""
+        return self._destroy - self._other
+
+
+def _damage_group_classes(root):
+    """Map every DamagesGroup name in the document to "is this a kill?".
+
+    The kill group is identified by what it *does*, i.e. it contains a
+    `<DamageBehavior class="Destroy" />`, not by what it is called. The
+    impls also define a `DestroyEngine` group that only raises a
+    MovementNotification, so a name-based rule mislabels every part wired
+    to it.
+    """
+    out = {}
+    for group in root.iter("DamagesGroup"):
+        name = group.get("name", "")
+        if not name:
+            continue
+        is_destroy = any(b.get("class") == "Destroy"
+                         for b in group.iter("DamageBehavior"))
+        out[name] = out.get(name, False) or is_destroy
+    return out
+
+
+def _destroy_groups(root, registry=None):
+    """Destroy-group names in scope for this document."""
+    names = {n for n, is_destroy in _damage_group_classes(root).items()
+             if is_destroy}
+    if registry is not None:
+        names |= registry.unambiguous()
+    return names
+
+
+def _part_is_vital(part_elem, destroy_groups):
+    """True when destroying this part destroys the whole vehicle.
+
+    The part's own `<DamageBehaviors>` must hand off to a damage group that
+    kills the vehicle:
+
+        <DamageBehaviors>
+          <DamageBehavior class="Group" damageRatioMin="1">
+            <Group name="Destroy" />
+          </DamageBehavior>
+        </DamageBehaviors>
+    """
+    if not destroy_groups:
+        return False
+    behaviors = part_elem.find("DamageBehaviors")
+    if behaviors is None:
+        return False
+    for behavior in behaviors.findall("DamageBehavior"):
+        if behavior.get("class") != "Group":
+            continue
+        for group in behavior.iter("Group"):
+            if group.get("name", "") in destroy_groups:
+                return True
+    return False
+
+
+def _collect_hull_hp(main_part, destroy_groups=()):
     """Collect damageMax from structural parts for Hull stats.
 
-    Only includes structural parts (AnimatedJoint, Animated, etc.) — skips
-    ItemPort and MassBox parts (those are swappable components, not hull).
+    Only includes structural parts (AnimatedJoint, Animated, etc.) and
+    skips ItemPort and MassBox parts (those are swappable components, not
+    hull).
 
     Returns flat dict: {VitalParts: {name: hp}, Parts: {name: hp}}
-    VitalParts = top-level structural (Body, Nose).
+    VitalParts = parts whose destruction triggers a damage group that
+    destroys the vehicle (see _part_is_vital), at any depth in the tree:
+    the Hornet F7A wires nose and tail while both hang off Body.
     Parts = everything else with damageMax.
     """
-    _VITAL_NAMES = {"body", "nose", "hull", "fuselage"}
     vital_parts = {}
     parts = {}
 
-    def _walk(elem, is_top_level=False):
+    def _walk(elem):
         for child in elem:
             if child.tag == "Part":
                 part_class = child.get("class", "")
@@ -275,16 +375,15 @@ def _collect_hull_hp(main_part):
                 name = child.get("name", "")
                 dmg_max = safe_float(child.get("damageMax", "0"))
                 if dmg_max:
-                    if is_top_level and name.lower() in _VITAL_NAMES:
+                    if _part_is_vital(child, destroy_groups):
                         vital_parts[name] = dmg_max
                     else:
                         parts[name] = dmg_max
-                _walk(child, is_top_level=False)
+                _walk(child)
             elif child.tag == "Parts":
-                _walk(child, is_top_level=is_top_level)
+                _walk(child)
 
-    # Children of main_part are top-level structural parts
-    _walk(main_part, is_top_level=True)
+    _walk(main_part)
 
     result = {}
     if vital_parts:

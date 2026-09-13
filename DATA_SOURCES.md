@@ -1169,6 +1169,14 @@ These are applied as deltas to IFCS fields for items with "_Blade_HND" or "_Blad
 - **Source**: Vehicle implementation XML (veh_impl_parser)
 - **Builder**: `ships._build_hull_stats()` line 443-457
 - **Extracting**: Structural HP for vital parts and ship parts
+- **VitalParts rule**: a part counts as vital when its own `<DamageBehaviors>`
+  contains `<DamageBehavior class="Group">` pointing at a `DamagesGroup` that
+  carries a `<DamageBehavior class="Destroy" />`, at any depth in the part tree.
+  The group is matched by that behavior, not by its name (the same files define
+  a `DestroyEngine` group that only raises a MovementNotification).
+  Parts-only `Modifications/<Variant>.xml` files inherit their `DamagesGroups`
+  from the base impl, so group names are resolved through a corpus-wide
+  registry built while parsing the base impls.
 
 ### Ships.BaseLoadout
 - **Source**: Computed from Hardpoints (aggregate installed items by port category)
