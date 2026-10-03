@@ -4537,6 +4537,20 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
             if item_default:
                 children = item_default
 
+        # Ports the loadout doesn't mention fall back to the port's own
+        # <defaultItem> (SItemPortDef). The Eclipse torpedo rack and the
+        # Gladiator ordnance bay are installed by the ship loadout without
+        # children; their missile ports default to Argos IX / Stalker. An
+        # explicit loadout entry for the port (even an empty one) wins.
+        _named = {(c.get("portName") or "").lower() for c in children or []}
+        _defaults = [
+            {"portName": p["name"], "entityClassReference": p["defaultItem"], "children": []}
+            for p in item_record.get("components", {}).get("ports", []) or []
+            if p.get("defaultItem") and p.get("name") and p["name"].lower() not in _named
+        ]
+        if _defaults:
+            children = list(children or []) + _defaults
+
         # When the parent item is a turret or a missile/bomb rack, reference
         # only emits weapon-like sub-ports (the guns / missiles inside).
         # Ship loadouts often enumerate cockpit displays, seat-access panels,
