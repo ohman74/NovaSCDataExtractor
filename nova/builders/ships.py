@@ -2758,6 +2758,10 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
     # loadout list before classifying. The wing item itself doesn't
     # classify (AttachedPart isn't a hardpoint category) but its child
     # weapon mount IS a top-level PilotWeapons hardpoint per reference.
+    # The promoted port is defined on the wing item, not in the ship impl, so
+    # its definition (sizes, types, flags) is taken from the wing item's own
+    # port list; without it the entry would fall back to the installed
+    # mount's size.
     extra_promoted = []
     for _e in loadout_entries:
         _ec, _ir = _resolve_entry(_e, ctx)
@@ -2765,9 +2769,17 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
             continue
         _ad = _ir.get("attachDef", {})
         if _ad.get("type") == "AttachedPart":
+            _wing_ports = {
+                (p.get("name") or "").lower(): p
+                for p in _ir.get("components", {}).get("ports", []) or []
+            }
             for _c in _e.get("children", []) or []:
                 if _c.get("entityClassName") or _c.get("entityClassReference"):
                     extra_promoted.append(_c)
+                    _wp = _wing_ports.get((_c.get("portName") or "").lower())
+                    if _wp and _wp.get("name") and _wp["name"].lower() not in port_defs_lower:
+                        port_defs[_wp["name"]] = _wp
+                        port_defs_lower[_wp["name"].lower()] = _wp
     if extra_promoted:
         loadout_entries = list(loadout_entries) + extra_promoted
 
@@ -4338,18 +4350,13 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
         mfr = ctx.get_manufacturer(ad.get("manufacturerGuid", ""))
 
         # Use port definition from vehicle impl for size/types if available.
-        # For installed missile/bomb racks, clamp MaxSize to the item's
-        # actual size — Hornet F7C_Mk2-style port defs accept range 3-4
-        # but reference reports MaxSize=3 when a size-3 rack is installed.
+        # The port's own min/maxSize are emitted as-is, missile/bomb racks
+        # included: clamping MaxSize to the installed rack's size hid racks
+        # the port really accepts (a larger bespoke rack on a port whose
+        # default loadout is a smaller one).
         if port_def:
-            pmin = port_def.get("minSize", size)
-            pmax = port_def.get("maxSize", size)
-            entry["MinSize"] = pmin
-            if (full_type == "MissileLauncher.MissileRack"
-                    or full_type == "BombLauncher.BombRack") and size:
-                entry["MaxSize"] = min(pmax, size)
-            else:
-                entry["MaxSize"] = pmax
+            entry["MinSize"] = port_def.get("minSize", size)
+            entry["MaxSize"] = port_def.get("maxSize", size)
         else:
             entry["MinSize"] = size
             entry["MaxSize"] = size
@@ -4580,17 +4587,15 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
                         for t in child_types
                     ):
                         continue
-                    # MissileRack/BombLauncher rack parents: drop sub-ports
-                    # that don't exist in the rack item's port list. Hornet
-                    # F7CM_Heartseeker installs a 4-missile loadout chain on
-                    # a 2-missile rack (MRCK_S03_BEHR_Dual_S02 has only
-                    # missile_01/02_attach defined); REF respects the rack's
-                    # port list and excludes missile_03/04.
-                    if (full_type.startswith("MissileLauncher.")
-                            or full_type.startswith("BombLauncher.")
-                            or full_type.startswith("GroundVehicleMissileLauncher.")):
-                        if child_port_def is None:
-                            continue
+                # Drop loadout entries for ports the parent item doesn't
+                # have: the game can't attach to a port that doesn't exist,
+                # and there is no port definition to take sizes/types from.
+                # Hornet F7CM_Heartseeker installs a 4-missile loadout chain
+                # on a 2-missile rack (missile_03/04 don't exist); the ROC
+                # loadout nests a second hardpoint_mining_laser under the
+                # mining laser itself.
+                if child_port_def is None:
+                    continue
                 # Reference uses the item's canonical PortName casing.
                 child_pn = child_port_def.get("name") if child_port_def else child_pn_loadout
                 sub = _build_standard_entry(
