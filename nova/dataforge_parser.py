@@ -2612,6 +2612,13 @@ def _parse_item_port(elem):
     if ctrl_tag:
         port["controllableTags"] = ctrl_tag
 
+    # <defaultItem entityClass="GUID"/>: the item the port is filled with when
+    # no loadout entry names this port (e.g. the Argos IX torpedoes on the
+    # Eclipse torpedo rack, which the ship loadout installs without children).
+    default_item = elem.find("defaultItem")
+    if default_item is not None and default_item.get("entityClass"):
+        port["defaultItem"] = default_item.get("entityClass")
+
     # Entity-XML priority groups live under <control><SCItemControl*Params>
     # <controllableGroups><SCItemControllableGroupParams><priorityGroups>
     # <SCItemPriorityGroupParam itemType="X" defaultPriority="N">

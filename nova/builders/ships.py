@@ -5,7 +5,7 @@ import re
 
 from ..utils import safe_float, safe_int, resolve_name, NULL_GUID
 from ..vehicle_impl_parser import get_vehicle_impl_data
-from .stditem import _clean_description
+from .stditem import _class_value, _clean_description, _firing_cadence
 
 # Movement classes that indicate ground vehicles (case-insensitive)
 _GROUND_MOVEMENT_CLASSES = {"arcadewheeled", "wheeled", "tracked"}
@@ -36,6 +36,11 @@ _AI_MISSION_PATTERNS = [
     #   removed — can't be damaged, not a valid player ship.
     "_Advocacy", "_Indestructible",
 ]
+
+# Trailing `_Test` / `_TEST` token marking a developer bench variant.
+# Case-insensitive because CIG spells it both ways (`_BMBRCK_S03_TEST` vs
+# `_Bomb_Test`). See `_is_ai_or_excluded_variant` for the structural audit.
+_DEV_TEST_TOKEN_RE = re.compile(r"_test(?:_|$)", re.IGNORECASE)
 
 
 def _is_ground_vehicle(vehicle):
@@ -235,6 +240,29 @@ def _is_ai_or_excluded_variant(class_name):
     # `Unmanned` encounters. Verified against Game2.xml: no structural diff
     # separates them from the base. Name suffix stays as last-resort.
     if cn.endswith("_Unmanned"):
+        return True
+
+    # Developer test rigs: `*_Test` / `*_TEST` trailing token
+    # (AEGS_Eclipse_BMBRCK_S03/S05/S10_TEST, ANVL_Gladiator_BMBRCK_S03/S05_TEST,
+    # BANU_Defender_Bomb_Test, RSI_Mantis_Bomb_Test). These are weapon/bomb-rack
+    # bench variants CIG uses to try alternate ordnance on an existing hull.
+    #
+    # Name-based by necessity. Structural attempt on 2026-08-01 against the
+    # 1105-record LIVE corpus: each rig is identical to its base record in
+    # every field the extractor can see — same `inclusionMode`
+    # ("ReadyToInclude" on both), same AttachDef (Type/SubType/Size/Grade/
+    # Tags/manufacturer), same entityTagGuids, same insurance block, same
+    # vehicleName, same vehicleDefinition, same component set, same
+    # SCItemPurchasableParams. The only gameplay delta is a swapped
+    # `defaultLoadout` entry (a BombRack item on a weapon hardpoint), which
+    # is not a dev-content signal — real bombers carry the same racks. No
+    # shop/spawn record in Game2.xml or the foundry records references them.
+    #
+    # `_test(_|$)` matches only a trailing/standalone token, so hypothetical
+    # future names like `*_Testbed` are not caught. Corpus check: 8 records
+    # match, the 7 above plus `SalvageableDebris_test` (already dropped by
+    # `_is_salvageable_debris`). No player-ownable ship matches.
+    if _DEV_TEST_TOKEN_RE.search(cn):
         return True
 
     return False
@@ -1555,7 +1583,16 @@ def _compute_hardpoint_dps(hardpoint_entry, ctx):
         return 0.0
 
     fm = weapon["firingModes"][0]
-    rpm = fm.get("fireRate", 0)
+    # Go through the shared cadence helper rather than reading `fireRate`
+    # off the mode. The nominal fireRate is not the weapon's effective rate
+    # for charged or sequence weapons, so reading it here left PilotBurstDPS
+    # contradicting the same weapon's own RoundsPerMinute on 25 weapons
+    # across 20 ships (Singe S3 overstated 4.8x, Whiptail understated 3x).
+    # Sustained rate, not burst_rpm: "burst DPS" here means damage while the
+    # trigger is held, as opposed to a sustained figure that would also
+    # account for capacitor drain and overheating.
+    rpm, _burst_rpm, _shot_count = _firing_cadence(
+        fm, fm.get("fireType", "single"), False)
     pellets = fm.get("pelletCount", 1) or 1
     if not rpm:
         return 0.0
@@ -2721,6 +2758,10 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
     # loadout list before classifying. The wing item itself doesn't
     # classify (AttachedPart isn't a hardpoint category) but its child
     # weapon mount IS a top-level PilotWeapons hardpoint per reference.
+    # The promoted port is defined on the wing item, not in the ship impl, so
+    # its definition (sizes, types, flags) is taken from the wing item's own
+    # port list; without it the entry would fall back to the installed
+    # mount's size.
     extra_promoted = []
     for _e in loadout_entries:
         _ec, _ir = _resolve_entry(_e, ctx)
@@ -2728,9 +2769,17 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
             continue
         _ad = _ir.get("attachDef", {})
         if _ad.get("type") == "AttachedPart":
+            _wing_ports = {
+                (p.get("name") or "").lower(): p
+                for p in _ir.get("components", {}).get("ports", []) or []
+            }
             for _c in _e.get("children", []) or []:
                 if _c.get("entityClassName") or _c.get("entityClassReference"):
                     extra_promoted.append(_c)
+                    _wp = _wing_ports.get((_c.get("portName") or "").lower())
+                    if _wp and _wp.get("name") and _wp["name"].lower() not in port_defs_lower:
+                        port_defs[_wp["name"]] = _wp
+                        port_defs_lower[_wp["name"].lower()] = _wp
     if extra_promoted:
         loadout_entries = list(loadout_entries) + extra_promoted
 
@@ -3382,9 +3431,6 @@ def _enrich_weapon_mount_unwrap(tree, loadout_entries, ctx, port_defs):
     items installed in TurretBase.MannedTurret-typed ports and reference treats
     them inconsistently — skipping those for safety.
     """
-    from .stditem import (MANUFACTURER_CLASS, _COMPONENT_TYPES_CLASSED,
-                            _CLASS_VALUE_OVERRIDES)
-
     weapons = tree.setdefault("Weapons", {})
     mt = weapons.setdefault("MannedTurrets", {})
     mt.setdefault("InstalledItems", [])
@@ -3418,10 +3464,7 @@ def _enrich_weapon_mount_unwrap(tree, loadout_entries, ctx, port_defs):
                 )
                 should_unwrap = outer_accepts_wm or "mountedgun" in pn_lower
                 if should_unwrap:
-                    _emit_unwrapped_weapon(mt, item, ad, port_name, pd, ctx,
-                                             MANUFACTURER_CLASS,
-                                             _COMPONENT_TYPES_CLASSED,
-                                             _CLASS_VALUE_OVERRIDES)
+                    _emit_unwrapped_weapon(mt, item, ad, port_name, pd, ctx)
                 # Don't recurse into WeaponMount children; the inner weapon
                 # is emitted directly. Continue to next sibling.
                 continue
@@ -3431,9 +3474,7 @@ def _enrich_weapon_mount_unwrap(tree, loadout_entries, ctx, port_defs):
     _walk(loadout_entries)
 
 
-def _emit_unwrapped_weapon(mt, wm_item, wm_ad, outer_port_name, outer_pd, ctx,
-                              MANUFACTURER_CLASS, _COMPONENT_TYPES_CLASSED,
-                              _CLASS_VALUE_OVERRIDES):
+def _emit_unwrapped_weapon(mt, wm_item, wm_ad, outer_port_name, outer_pd, ctx):
     """Emit a single unwrapped weapon entry into mt.InstalledItems."""
     # Find the WeaponMount item's `weapon` sub-port definition
     weapon_port = None
@@ -3475,13 +3516,7 @@ def _emit_unwrapped_weapon(mt, wm_item, wm_ad, outer_port_name, outer_pd, ctx,
         bl_name = weapon_cn
 
     mfr = ctx.get_manufacturer(weapon_ad.get("manufacturerGuid", ""))
-    mfr_code = (mfr or {}).get("Code", "") if mfr else ""
-    base_type = weapon_full_type.split(".")[0] if weapon_full_type else ""
-    bl_class = ""
-    if weapon_cn in _CLASS_VALUE_OVERRIDES:
-        bl_class = _CLASS_VALUE_OVERRIDES[weapon_cn]
-    elif base_type in _COMPONENT_TYPES_CLASSED and mfr_code:
-        bl_class = MANUFACTURER_CLASS.get(mfr_code, "")
+    bl_class = _class_value(weapon_cn, weapon_full_type, weapon_ad, mfr, ctx)
 
     bl = {
         "ClassName": weapon_cn,
@@ -4301,18 +4336,13 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
         mfr = ctx.get_manufacturer(ad.get("manufacturerGuid", ""))
 
         # Use port definition from vehicle impl for size/types if available.
-        # For installed missile/bomb racks, clamp MaxSize to the item's
-        # actual size — Hornet F7C_Mk2-style port defs accept range 3-4
-        # but reference reports MaxSize=3 when a size-3 rack is installed.
+        # The port's own min/maxSize are emitted as-is, missile/bomb racks
+        # included: clamping MaxSize to the installed rack's size hid racks
+        # the port really accepts (a larger bespoke rack on a port whose
+        # default loadout is a smaller one).
         if port_def:
-            pmin = port_def.get("minSize", size)
-            pmax = port_def.get("maxSize", size)
-            entry["MinSize"] = pmin
-            if (full_type == "MissileLauncher.MissileRack"
-                    or full_type == "BombLauncher.BombRack") and size:
-                entry["MaxSize"] = min(pmax, size)
-            else:
-                entry["MaxSize"] = pmax
+            entry["MinSize"] = port_def.get("minSize", size)
+            entry["MaxSize"] = port_def.get("maxSize", size)
         else:
             entry["MinSize"] = size
             entry["MaxSize"] = size
@@ -4329,21 +4359,8 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
             entry["Loadout"] = src_ref or item_guid or entity_class
         else:
             entry["Loadout"] = item_guid or entity_class
-        # BaseLoadout.Class: look up via manufacturer class map (matches stditem.py)
-        from .stditem import (MANUFACTURER_CLASS, _COMPONENT_TYPES_CLASSED,
-                                _CLASS_VALUE_OVERRIDES)
-        base_type = full_type.split(".")[0] if full_type else ""
-        mfr_code = (mfr or {}).get("Code", "") if mfr else ""
-        bl_class = ""
-        if entity_class in _CLASS_VALUE_OVERRIDES:
-            bl_class = _CLASS_VALUE_OVERRIDES[entity_class]
-        elif base_type in _COMPONENT_TYPES_CLASSED and mfr_code:
-            if full_type == "LifeSupportGenerator.UNDEFINED":
-                # Capital-class (size 4) is ship-integrated; smaller sizes
-                # are player-purchasable civilian grade.
-                bl_class = "" if ad.get("size") == 4 else "Civilian"
-            else:
-                bl_class = MANUFACTURER_CLASS.get(mfr_code, "")
+        # BaseLoadout.Class: same derivation as stdItem.Class
+        bl_class = _class_value(entity_class, full_type, ad, mfr, ctx)
         # Reference's BaseLoadout.Class behaviour is type-specific: it
         # consistently omits Class for FlightController, WheeledController,
         # Display, Room, ToolArm, and a handful of controller-style turrets,
@@ -4493,6 +4510,20 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
             if item_default:
                 children = item_default
 
+        # Ports the loadout doesn't mention fall back to the port's own
+        # <defaultItem> (SItemPortDef). The Eclipse torpedo rack and the
+        # Gladiator ordnance bay are installed by the ship loadout without
+        # children; their missile ports default to Argos IX / Stalker. An
+        # explicit loadout entry for the port (even an empty one) wins.
+        _named = {(c.get("portName") or "").lower() for c in children or []}
+        _defaults = [
+            {"portName": p["name"], "entityClassReference": p["defaultItem"], "children": []}
+            for p in item_record.get("components", {}).get("ports", []) or []
+            if p.get("defaultItem") and p.get("name") and p["name"].lower() not in _named
+        ]
+        if _defaults:
+            children = list(children or []) + _defaults
+
         # When the parent item is a turret or a missile/bomb rack, reference
         # only emits weapon-like sub-ports (the guns / missiles inside).
         # Ship loadouts often enumerate cockpit displays, seat-access panels,
@@ -4543,17 +4574,15 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
                         for t in child_types
                     ):
                         continue
-                    # MissileRack/BombLauncher rack parents: drop sub-ports
-                    # that don't exist in the rack item's port list. Hornet
-                    # F7CM_Heartseeker installs a 4-missile loadout chain on
-                    # a 2-missile rack (MRCK_S03_BEHR_Dual_S02 has only
-                    # missile_01/02_attach defined); REF respects the rack's
-                    # port list and excludes missile_03/04.
-                    if (full_type.startswith("MissileLauncher.")
-                            or full_type.startswith("BombLauncher.")
-                            or full_type.startswith("GroundVehicleMissileLauncher.")):
-                        if child_port_def is None:
-                            continue
+                # Drop loadout entries for ports the parent item doesn't
+                # have: the game can't attach to a port that doesn't exist,
+                # and there is no port definition to take sizes/types from.
+                # Hornet F7CM_Heartseeker installs a 4-missile loadout chain
+                # on a 2-missile rack (missile_03/04 don't exist); the ROC
+                # loadout nests a second hardpoint_mining_laser under the
+                # mining laser itself.
+                if child_port_def is None:
+                    continue
                 # Reference uses the item's canonical PortName casing.
                 child_pn = child_port_def.get("name") if child_port_def else child_pn_loadout
                 sub = _build_standard_entry(

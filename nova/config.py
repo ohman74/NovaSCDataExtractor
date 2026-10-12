@@ -92,8 +92,13 @@ class Config:
         appdata = os.environ.get("APPDATA")
         if not appdata:
             return None
-        log_path = os.path.join(appdata, "rsilauncher", "logs", "log.log")
-        if not os.path.isfile(log_path):
+        # The launcher rotates log.log into log.old.log, so the install
+        # entry for a build that hasn't been patched since can live in
+        # either. Scan the rotated file first so the newest match wins.
+        log_dir = os.path.join(appdata, "rsilauncher", "logs")
+        log_paths = [os.path.join(log_dir, n) for n in ("log.old.log", "log.log")]
+        log_paths = [lp for lp in log_paths if os.path.isfile(lp)]
+        if not log_paths:
             return None
         info = self.get_version_info()
         p4 = info.get("p4_change")
@@ -106,14 +111,15 @@ class Config:
             + r"\." + re.escape(p4) + r"\b"
         )
         last_match = None
-        try:
-            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    m = pattern.search(line)
-                    if m:
-                        last_match = m.group(1)
-        except OSError:
-            return None
+        for log_path in log_paths:
+            try:
+                with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        m = pattern.search(line)
+                        if m:
+                            last_match = m.group(1)
+            except OSError:
+                continue
         return last_match
 
     def is_cache_stale(self):

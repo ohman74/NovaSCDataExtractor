@@ -29,11 +29,15 @@ def parse_vehicle_implementations(cache_dir):
     files = [f for f in os.listdir(veh_dir) if f.endswith(".xml")]
     parsed = 0
     failed = 0
+    # Filled in while parsing the base impls, then consulted by the
+    # parts-only Modifications files, which inherit their DamagesGroups
+    # from whichever base they override.
+    destroy_groups = _DestroyGroupRegistry()
 
     for filename in files:
         filepath = os.path.join(veh_dir, filename)
         try:
-            data = _parse_vehicle_xml(filepath)
+            data = _parse_vehicle_xml(filepath, destroy_groups)
             if data:
                 name = data.get("name", os.path.splitext(filename)[0])
                 results[name] = data
@@ -61,7 +65,7 @@ def parse_vehicle_implementations(cache_dir):
             variant_name = os.path.splitext(filename)[0]
             filepath = os.path.join(mod_dir, filename)
             try:
-                data = _parse_modification_xml(filepath)
+                data = _parse_modification_xml(filepath, destroy_groups)
                 if data:
                     if not data.get("name"):
                         data["name"] = variant_name
@@ -78,7 +82,7 @@ def parse_vehicle_implementations(cache_dir):
     return results
 
 
-def _parse_modification_xml(filepath):
+def _parse_modification_xml(filepath, registry=None):
     """Parse a Modifications/<Variant>.xml file.
 
     Two structures occur:
@@ -96,24 +100,29 @@ def _parse_modification_xml(filepath):
         return None
     if root.tag != "Modifications":
         return None
+    # A variant file may carry its own <Damages> override (Sentinel,
+    # Hoplite) but usually inherits the base's groups, so union both.
+    groups = _destroy_groups(root, registry)
     veh = root.find("Vehicle")
     if veh is not None:
-        return _extract_vehicle_data(veh)
+        return _extract_vehicle_data(veh, groups)
     parts_elem = root.find("Parts")
     if parts_elem is None:
         return None
     main_part = parts_elem.find("Part")
     if main_part is None:
         return None
+    structural = _collect_structural_parts(main_part, groups)
     return {
         "name": "",
         "ports": _parse_parts_recursive(main_part),
-        "mass": _sum_structural_mass(main_part),
-        "hullHP": _collect_hull_hp(main_part),
+        "structuralParts": structural,
+        "mass": _mass_from_parts(structural),
+        "hullHP": _hull_hp_from_parts(structural),
     }
 
 
-def _parse_vehicle_xml(filepath):
+def _parse_vehicle_xml(filepath, registry=None):
     """Parse a single vehicle implementation XML."""
     try:
         tree = ET.parse(filepath)
@@ -124,11 +133,18 @@ def _parse_vehicle_xml(filepath):
     if root.tag != "Vehicle":
         return None
 
-    return _extract_vehicle_data(root)
+    # Base impls define every damage group they reference, so their own
+    # <Damages> block is authoritative; the registry only collects them
+    # for the variant files parsed afterwards.
+    if registry is not None:
+        registry.observe(root)
+    return _extract_vehicle_data(root, _destroy_groups(root))
 
 
-def _extract_vehicle_data(root):
+def _extract_vehicle_data(root, destroy_groups=None):
     """Extract vehicle metadata + ports from a <Vehicle> element."""
+    if destroy_groups is None:
+        destroy_groups = _destroy_groups(root)
     result = {
         "name": root.get("name", ""),
         "displayName": root.get("displayname", ""),
@@ -142,11 +158,13 @@ def _extract_vehicle_data(root):
     if parts_elem is not None:
         main_part = parts_elem.find("Part")
         if main_part is not None:
-            # Mass: sum all structural part masses (excluding ItemPort and MassBox)
-            result["mass"] = _sum_structural_mass(main_part)
+            # One walk of the structural tree feeds both mass and hull HP,
+            # and keeps the part ids that inline <Elem> overrides target.
+            structural = _collect_structural_parts(main_part, destroy_groups)
+            result["structuralParts"] = structural
+            result["mass"] = _mass_from_parts(structural)
             result["ports"] = _parse_parts_recursive(main_part)
-            # Hull HP: structural part damageMax values + thruster HP
-            result["hullHP"] = _collect_hull_hp(main_part)
+            result["hullHP"] = _hull_hp_from_parts(structural)
 
     # Wheeled / tracked ground-vehicle dynamics (PhysicalWheeled or PhysicalTracked).
     # Used for SteerCharacteristics + TrackSteerCharacteristics + TrackWheeledCharacteristics.
@@ -155,9 +173,10 @@ def _extract_vehicle_data(root):
         result["groundDynamics"] = physics
 
     # Inline <Modifications> at the root carry per-variant overrides keyed
-    # by name (Zeus_CL, F7C_Mk2, ...). Each Modification has Elems whose
-    # idRef targets a Part by id — we record the (idRef, attr, value)
-    # triples so callers can apply them on the port tree per variant.
+    # by name (Zeus_CL, F7C_Mk2, ...). Each Modification names the patch
+    # file it layers on top of, and carries Elems whose idRef targets a
+    # Part by id, so we record both the patchFile and the (idRef, attr,
+    # value) triples for callers to resolve per variant.
     inline_mods = _extract_inline_modifications(root)
     if inline_mods:
         result["inlineModifications"] = inline_mods
@@ -166,11 +185,22 @@ def _extract_vehicle_data(root):
 
 
 def _extract_inline_modifications(root):
-    """Return {variant_name: [{idRef, name, value}, ...]} for inline mods.
+    """Return {variant_name: {patchFile, elems}} for inline mods.
 
     Modifications elements appear directly under the Vehicle root and group
-    one or more `<Modification name="...">` blocks, each containing
+    one or more `<Modification name="...">` blocks, each optionally naming
+    a `patchFile` and containing
     `<Elems><Elem idRef="..." name="..." value="..." /></Elems>` overrides.
+
+    `patchFile` is the explicit link from a variant name to the
+    Modifications/ file that rewrites the part tree for it, e.g.
+
+        <Modification name="F7CM_Heartseeker"
+                      patchFile="Modifications/ANVL_Hornet_F7CM">
+
+    Several variants can share one patch file (the Heartseeker is an F7CM
+    with different turrets and paint), which is why the file cannot be
+    found by matching the entity class name against the filename.
     """
     mods_elem = root.find("Modifications")
     if mods_elem is None:
@@ -180,6 +210,7 @@ def _extract_inline_modifications(root):
         name = mod.get("name", "")
         if not name:
             continue
+        patch_file = mod.get("patchFile", "") or ""
         elems = []
         # Both <Elems><Elem .../></Elems> and direct <Elem .../> are seen.
         for child in list(mod):
@@ -196,8 +227,8 @@ def _extract_inline_modifications(root):
                     "name": child.get("name", ""),
                     "value": child.get("value", ""),
                 })
-        if elems:
-            out[name] = elems
+        if elems or patch_file:
+            out[name] = {"patchFile": patch_file, "elems": elems}
     return out or None
 
 
@@ -235,62 +266,168 @@ def _collect_ground_vehicle_dynamics(root):
     return out if out else None
 
 
-def _sum_structural_mass(elem):
-    """Sum mass of all structural parts (excluding ItemPort and MassBox)."""
-    part_class = elem.get("class", "")
-    if part_class in ("ItemPort", "MassBox"):
-        return 0
+class _DestroyGroupRegistry:
+    """Corpus-wide record of which DamagesGroup names destroy the vehicle.
 
-    total = safe_float(elem.get("mass", "0"))
-    for child in elem:
-        if child.tag == "Part":
-            total += _sum_structural_mass(child)
-        elif child.tag == "Parts":
-            for sub in child:
-                if sub.tag == "Part":
-                    total += _sum_structural_mass(sub)
-    return total
+    Parts-only `Modifications/<Variant>.xml` files redefine the part tree
+    (including each part's `<DamageBehavior class="Group">` wiring) but
+    inherit `<Damages><DamagesGroups>` from the base impl, and carry no
+    pointer back to it. So we accumulate group definitions while parsing
+    the base impls (which are always self-contained) and let the variant
+    files resolve their group references against that.
 
-
-def _collect_hull_hp(main_part):
-    """Collect damageMax from structural parts for Hull stats.
-
-    Only includes structural parts (AnimatedJoint, Animated, etc.) — skips
-    ItemPort and MassBox parts (those are swappable components, not hull).
-
-    Returns flat dict: {VitalParts: {name: hp}, Parts: {name: hp}}
-    VitalParts = top-level structural (Body, Nose).
-    Parts = everything else with damageMax.
+    A name only counts when every definition of it in the corpus carries a
+    `class="Destroy"` behavior, so a name reused for something else
+    somewhere cannot leak into a variant that never meant it.
     """
-    _VITAL_NAMES = {"body", "nose", "hull", "fuselage"}
-    vital_parts = {}
-    parts = {}
 
-    def _walk(elem, is_top_level=False):
+    def __init__(self):
+        self._destroy = set()
+        self._other = set()
+
+    def observe(self, root):
+        """Record every DamagesGroup defined in this document."""
+        for name, is_destroy in _damage_group_classes(root).items():
+            (self._destroy if is_destroy else self._other).add(name)
+
+    def unambiguous(self):
+        """Group names that mean "destroy the vehicle" everywhere."""
+        return self._destroy - self._other
+
+
+def _damage_group_classes(root):
+    """Map every DamagesGroup name in the document to "is this a kill?".
+
+    The kill group is identified by what it *does*, i.e. it contains a
+    `<DamageBehavior class="Destroy" />`, not by what it is called. The
+    impls also define a `DestroyEngine` group that only raises a
+    MovementNotification, so a name-based rule mislabels every part wired
+    to it.
+    """
+    out = {}
+    for group in root.iter("DamagesGroup"):
+        name = group.get("name", "")
+        if not name:
+            continue
+        is_destroy = any(b.get("class") == "Destroy"
+                         for b in group.iter("DamageBehavior"))
+        out[name] = out.get(name, False) or is_destroy
+    return out
+
+
+def _destroy_groups(root, registry=None):
+    """Destroy-group names in scope for this document."""
+    names = {n for n, is_destroy in _damage_group_classes(root).items()
+             if is_destroy}
+    if registry is not None:
+        names |= registry.unambiguous()
+    return names
+
+
+def _part_is_vital(part_elem, destroy_groups):
+    """True when destroying this part destroys the whole vehicle.
+
+    The part's own `<DamageBehaviors>` must hand off to a damage group that
+    kills the vehicle:
+
+        <DamageBehaviors>
+          <DamageBehavior class="Group" damageRatioMin="1">
+            <Group name="Destroy" />
+          </DamageBehavior>
+        </DamageBehaviors>
+    """
+    if not destroy_groups:
+        return False
+    behaviors = part_elem.find("DamageBehaviors")
+    if behaviors is None:
+        return False
+    for behavior in behaviors.findall("DamageBehavior"):
+        if behavior.get("class") != "Group":
+            continue
+        for group in behavior.iter("Group"):
+            if group.get("name", "") in destroy_groups:
+                return True
+    return False
+
+
+def _collect_structural_parts(main_part, destroy_groups=()):
+    """Flat list of every structural part, main_part first.
+
+    Only includes structural parts (AnimatedJoint, Animated, etc.) and
+    skips ItemPort and MassBox parts (those are swappable components, not
+    hull).
+
+    Keeping each part's `id` alongside its mass and damageMax is what lets
+    a variant's inline overrides reach the hull. Those elems target Parts
+    by id:
+
+        <Elem idRef="modPart_body" name="damageMax" value="700" />
+
+    and the parsed port tree they would otherwise be applied to does not
+    contain Parts at all, so they used to be dropped on the floor. Across
+    the impls that is 205 damageMax, 70 mass and 42 name overrides.
+
+    `vital` records whether destroying the part destroys the vehicle (see
+    _part_is_vital). No elem rewires damage behaviors, so it is read from
+    the XML once and survives any override.
+    """
+    parts = []
+
+    def _add(elem, root=False):
+        entry = {
+            "id": elem.get("id", ""),
+            "name": elem.get("name", ""),
+            "mass": safe_float(elem.get("mass", "0")),
+            "damageMax": safe_float(elem.get("damageMax", "0")),
+            "vital": _part_is_vital(elem, destroy_groups),
+        }
+        if root:
+            # The hull root carries the ship's own mass but is not itself
+            # one of the hull parts the Hull stats enumerate.
+            entry["root"] = True
+        parts.append(entry)
+
+    def _walk(elem):
         for child in elem:
             if child.tag == "Part":
-                part_class = child.get("class", "")
-                if part_class in ("ItemPort", "MassBox"):
+                if child.get("class", "") in ("ItemPort", "MassBox"):
                     continue
-                name = child.get("name", "")
-                dmg_max = safe_float(child.get("damageMax", "0"))
-                if dmg_max:
-                    if is_top_level and name.lower() in _VITAL_NAMES:
-                        vital_parts[name] = dmg_max
-                    else:
-                        parts[name] = dmg_max
-                _walk(child, is_top_level=False)
+                _add(child)
+                _walk(child)
             elif child.tag == "Parts":
-                _walk(child, is_top_level=is_top_level)
+                _walk(child)
 
-    # Children of main_part are top-level structural parts
-    _walk(main_part, is_top_level=True)
+    _add(main_part, root=True)
+    _walk(main_part)
+    return parts
+
+
+def _mass_from_parts(parts):
+    """Hull mass: the sum over every structural part, root included."""
+    return sum(p["mass"] for p in parts)
+
+
+def _hull_hp_from_parts(parts):
+    """Build {VitalParts: {name: hp}, Parts: {name: hp}} from the part list.
+
+    VitalParts = parts whose destruction triggers a damage group that
+    destroys the vehicle, at any depth in the tree: the Hornet F7A wires
+    nose and tail while both hang off Body.
+    Parts = everything else with damageMax.
+    """
+    vital_parts = {}
+    other = {}
+    for part in parts:
+        if part.get("root") or not part["damageMax"]:
+            continue
+        target = vital_parts if part["vital"] else other
+        target[part["name"]] = part["damageMax"]
 
     result = {}
     if vital_parts:
         result["VitalParts"] = vital_parts
-    if parts:
-        result["Parts"] = parts
+    if other:
+        result["Parts"] = other
     return result if result else None
 
 
@@ -515,18 +652,24 @@ def get_vehicle_impl_data(vehicle_impls, vehicle_definition, class_name,
                           modification=None):
     """Look up vehicle implementation data by vehicleDefinition path or className.
 
-    Resolution order (gated on the entity's `modification` field — the
-    structural signal of intent to use a variant override):
-    1. If `modification` is non-empty AND a Modifications/<className>.xml
-       override exists keyed by className → use that override.
-       (Sentinel, Hoplite, F7CM, Mustang Beta/Gamma/..., Cyclone variants.)
-    2. Otherwise, resolve the base impl by vehicleDefinition basename,
-       falling back to className. (Stinger, F7CM_Mk2 — entities whose
-       vehicleDefinition points at their own impl file.)
-    3. If `modification` is non-empty and the resolved impl carries an
-       inline `<Modification name="X">` block → apply its elem overrides
-       to the port tree. (F7C_Mk2/F7CR_Mk2/F7CS_Mk2 layered on F7A.xml;
-       Zeus CL/MR/ST layered on RSI_Zeus.xml.)
+    Resolution order (the variant steps are gated on the entity's
+    `modification` field, the structural signal of intent to use one):
+    1. Base impl by vehicleDefinition basename, falling back to className.
+       This is the authoritative pointer and also the document that
+       declares what each variant name means.
+    2. Variant override, taken from the base impl's inline
+       `<Modification name="X" patchFile="Modifications/Y">`: the patch
+       file named there is the ship's real part tree. Several variants
+       routinely share one patch file (F7CM, F7CM_Heartseeker, CalMason
+       and F7CM_SQ42 all patch from ANVL_Hornet_F7CM), so the file cannot
+       be found by matching the entity class name.
+       When the Modification declares no patchFile, or it points at a file
+       this build does not ship, fall back to a Modifications/ file named
+       after the entity class, then to the base impl untouched.
+    3. Apply that same Modification's `<Elems>` on top, which is how the
+       game layers per-variant attribute tweaks over the patched tree.
+       (F7C_Mk2/F7CR_Mk2/F7CS_Mk2 layered on F7A.xml; Zeus CL/MR/ST
+       layered on RSI_Zeus.xml.)
 
     Lookup is case-insensitive because vehicleDefinition paths from the
     game data are lowercase while impl filenames use proper casing
@@ -552,45 +695,72 @@ def get_vehicle_impl_data(vehicle_impls, vehicle_definition, class_name,
         orig = idx.get(key.lower())
         return vehicle_impls.get(orig) if orig else None
 
-    # 1. Variant override — only when modification is set. Modifications/
-    #    files keyed by className (AEGS_Vanguard_Sentinel etc.) take
-    #    precedence over the base impl pointed at by vehicleDefinition.
-    data = None
-    if modification:
-        overrides = vehicle_impls.get("__variant_overrides__") or {}
-        override_idx = vehicle_impls.get("__variant_overrides_lower__")
-        if override_idx is None:
-            override_idx = {k.lower(): k for k in overrides.keys()}
-            vehicle_impls["__variant_overrides_lower__"] = override_idx
-        orig = override_idx.get(class_name.lower())
-        if orig:
-            data = overrides.get(orig)
+    overrides = vehicle_impls.get("__variant_overrides__") or {}
+    override_idx = vehicle_impls.get("__variant_overrides_lower__")
+    if override_idx is None:
+        override_idx = {k.lower(): k for k in overrides.keys()}
+        vehicle_impls["__variant_overrides_lower__"] = override_idx
 
-    # 2. Base impl lookup by vehicleDefinition (authoritative path), then
+    def _override(key):
+        orig = override_idx.get((key or "").lower()) if key else None
+        return overrides.get(orig) if orig else None
+
+    # 1. Base impl by vehicleDefinition (authoritative path), then
     #    className as fallback for entities whose vehicleDefinition is
     #    missing or stale.
-    if data is None and vehicle_definition:
+    data = None
+    if vehicle_definition:
         basename = os.path.splitext(os.path.basename(vehicle_definition))[0]
         data = _get(basename)
     if data is None:
         data = _get(class_name)
+
+    # The base impl is what declares the variant, so read the Modification
+    # block from there rather than from whatever we end up returning.
+    mod_entry = None
+    if modification and data:
+        mod_entry = (data.get("inlineModifications") or {}).get(modification)
+
+    # 2. Variant override. patchFile is the explicit link and wins; the
+    #    className-keyed filename match is the weaker fallback for
+    #    Modification blocks that declare no patch file.
+    if modification:
+        variant = None
+        patch_file = mod_entry.get("patchFile") if mod_entry else ""
+        if patch_file:
+            stem = os.path.splitext(
+                os.path.basename(patch_file.replace("\\", "/")))[0]
+            variant = _override(stem)
+        if variant is None:
+            variant = _override(class_name)
+        if variant is not None:
+            data = variant
+
     if data is None:
         return None
 
-    # 3. Apply inline modification (Zeus_CL, F7C_Mk2, ...).
-    if modification and data.get("inlineModifications"):
-        elems = data["inlineModifications"].get(modification)
-        if elems:
-            data = _apply_inline_modification(data, elems)
+    # 3. Apply the variant's inline Elems (Zeus_CL, F7C_Mk2, ...) on top of
+    #    whatever tree step 2 settled on.
+    elems = mod_entry.get("elems") if mod_entry else None
+    if not elems and modification:
+        own = (data.get("inlineModifications") or {}).get(modification)
+        elems = own.get("elems") if own else None
+    if elems:
+        data = _apply_inline_modification(data, elems)
     return data
 
 
 def _apply_inline_modification(impl_data, elems):
-    """Return a copy of impl_data with `elems` applied to the port tree.
+    """Return a copy of impl_data with `elems` applied.
 
-    Each elem has {idRef, name, value}. Walks the port tree, finds every
-    port whose `id` matches `idRef`, and overrides the named attribute.
-    Special-cases skipPart so "0" clears the flag and "1" sets it.
+    Each elem has {idRef, name, value}. An id addresses either an ItemPort
+    or a structural Part, so both trees are indexed and each elem lands
+    wherever its id actually lives. Port elems override the named
+    attribute, with skipPart special-cased so "0" clears the flag and "1"
+    sets it. Part elems override mass, damageMax or name, after which hull
+    mass and Hull HP are recomputed from the patched list. The ORIG 350r
+    is the shape of it: its Modification skips six flair ports and pulls
+    body and tail down to 700 damageMax in the same block.
 
     The same id can appear at multiple positions in the parsed port tree
     (the recursive parser duplicates Parts nodes that sit inside
@@ -601,6 +771,10 @@ def _apply_inline_modification(impl_data, elems):
     new_data = copy.deepcopy(impl_data)
 
     ports_by_id = {}
+    parts_by_id = {}
+    for part in new_data.get("structuralParts") or []:
+        if part.get("id"):
+            parts_by_id.setdefault(part["id"], []).append(part)
 
     def _index(ports):
         for p in ports:
@@ -612,10 +786,29 @@ def _apply_inline_modification(impl_data, elems):
 
     _index(new_data.get("ports") or [])
 
+    hull_touched = False
     for elem in elems:
         idref = elem.get("idRef") or ""
         attr = elem.get("name") or ""
         value = elem.get("value") or ""
+        for part in parts_by_id.get(idref) or ():
+            if attr in ("mass", "damageMax"):
+                # safe_float turns an unparseable value into 0.0, which
+                # here would silently erase a real hull number. The data
+                # does carry one such value (the Gladius Valiant asks for
+                # a mass of "501.51" with a stray direction mark and an
+                # S glued on), so leave the part alone rather than zero it.
+                try:
+                    part[attr] = float(value)
+                except (TypeError, ValueError):
+                    continue
+            elif attr == "name":
+                part["name"] = value
+            else:
+                # Every other attr on a Part (Delay, filename, ...) is
+                # outside what the Hull stats are built from.
+                continue
+            hull_touched = True
         targets = ports_by_id.get(idref) or []
         for port in targets:
             if attr == "skipPart":
@@ -631,5 +824,10 @@ def _apply_inline_modification(impl_data, elems):
                 # Generic pass-through for `name`, `flags`, etc. The port dict
                 # uses the same key names as the impl XML attributes.
                 port[attr] = value
+
+    if hull_touched:
+        structural = new_data["structuralParts"]
+        new_data["mass"] = _mass_from_parts(structural)
+        new_data["hullHP"] = _hull_hp_from_parts(structural)
 
     return new_data

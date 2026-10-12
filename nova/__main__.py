@@ -32,6 +32,7 @@ from .cosmetic_classifier import (
     load_impl_xml_modifications,
 )
 from .socpak_parser import build_ship_storage_index
+from .loot_parser import parse_loot_records
 from .builders.slices import (
     build_vehicle_metadata,
     build_vehicle_stats,
@@ -50,6 +51,7 @@ from .builders.localities import build_localities
 from .builders.tags import build_tags
 from .builders.mission_types import build_mission_types
 from .builders.scenarios import build_scenarios
+from .builders.loot import build_loot_locations
 
 
 class BuildContext:
@@ -254,6 +256,7 @@ BUILDERS = {
     "tags":               ("tags.json",               build_tags),
     "mission_types":      ("mission_types.json",      build_mission_types),
     "scenarios":          ("scenarios.json",          build_scenarios),
+    "loot_locations":     ("loot_locations.json",     build_loot_locations),
 }
 
 
@@ -597,6 +600,12 @@ def run_extraction(config, args):
     from .tag_db_parser import parse_tag_database
     tags = parse_tag_database(config.cache_dir)
 
+    # Loot records live in a second pass rather than in stream_parse_dataforge:
+    # the loot graph is self-contained and keeping it out avoids widening that
+    # parser's already 24-wide return tuple. Costs one extra Game2.xml scan.
+    print("\n[PARSE] Parsing loot graph...")
+    loot = parse_loot_records(xml_path, config.cache_dir)
+
     print("\n[PARSE] Parsing entity files...")
     entity_data_map = {}
     weapon_pool_sizes = {}  # entity GUID -> WeaponGun FixedPowerPool size (0 for DynamicPowerPool)
@@ -769,6 +778,7 @@ def run_extraction(config, args):
                        mission_scenarios=mission_scenarios)
     ctx.matrix = matrix_data
     ctx.cache_dir = config.cache_dir
+    ctx.loot = loot
 
     # Build reverse index: blueprint_guid → list of reward sources. Used by
     # the blueprints builder to emit RewardSources[] on each blueprint and by

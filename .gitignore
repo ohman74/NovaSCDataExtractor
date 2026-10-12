@@ -13,6 +13,9 @@ temp/
 # Extraction run logs (local only)
 logs/
 
+# Generated patch/channel diff reports (regeneratable from two output snapshots)
+reports/
+
 # Python cache
 __pycache__/
 *.pyc
@@ -29,3 +32,4 @@ Thumbs.db
 
 # Claude session files
 .claude/
+.gstack/
