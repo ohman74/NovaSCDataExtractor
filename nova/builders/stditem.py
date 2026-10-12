@@ -98,7 +98,6 @@ _TYPES_PLACEHOLDER_FORCE_CLASS = frozenset({
 # Specific Class value overrides where ref uses a ship-based class or empty
 # instead of the item manufacturer's class.
 _CLASS_VALUE_OVERRIDES = {
-    "COOL_ACOM_S01_QuickCool_SCItem": "",
     "COOL_AEGS_S04_Reclaimer": "Industrial",
     "COOL_ORIG_S04_890J_SCItem": "Civilian",
     "COOL_WCPR_S03_Elsen_SCItem": "Civilian",
@@ -655,6 +654,61 @@ MANUFACTURER_CLASS = {
 }
 
 
+def _description_class(desc):
+    """Class value from a resolved description's metadata header, or "".
+
+    The header is the leading block of Key: Value lines that
+    _clean_description strips ("Item Type: Cooler", "Manufacturer: RSI",
+    "Size: 1", "Grade: B", "Class: Military"). It is the class the game
+    shows the player.
+    """
+    if not desc or desc.startswith("@"):
+        return ""
+    # Localization files use a literal \n as the line separator.
+    if "\\n" in desc:
+        desc = desc.replace("\\n", "\n")
+    lines = [l for l in desc.split("\n\n", 1)[0].split("\n") if l.strip()]
+    if not all(":" in l for l in lines):
+        return ""
+    for line in lines:
+        key, _, value = line.partition(":")
+        if key.strip().lower() == "class":
+            # strip() also drops the non-breaking space CIG sometimes
+            # puts after the colon.
+            return value.strip()
+    return ""
+
+
+def _class_value(class_name, full_type, attach_def, mfr, ctx):
+    """Class value for a ship item that carries a Class field.
+
+    Explicit override first, then the Class line of the localized
+    description, then the manufacturer table for component types whose
+    description states no class. A manufacturer builds more than one class
+    (RSI's Sovereign is Military, its Helios Industrial), so the table is
+    only the fallback.
+    """
+    if class_name in _CLASS_VALUE_OVERRIDES:
+        return _CLASS_VALUE_OVERRIDES[class_name]
+    item_type = attach_def.get("type", "")
+    # FPS items state a damage-type class ("Ballistic") that
+    # _fps_class_value derives structurally instead.
+    if not _is_fps_item(item_type, full_type, attach_def):
+        desc_class = _description_class(
+            ctx.resolve_name(attach_def.get("description", "")))
+        if desc_class:
+            return desc_class
+    base_type = full_type.split(".")[0] if full_type else ""
+    if base_type in _COMPONENT_TYPES_CLASSED and mfr:
+        # LifeSupport: capital-class (size 4) units are ship-integrated
+        # for Idris/Polaris/890 and carry empty Class; smaller sizes
+        # (S00–S03) are player-purchasable civilian grade.
+        if full_type == "LifeSupportGenerator.UNDEFINED":
+            return "" if attach_def.get("size") == 4 else "Civilian"
+        return MANUFACTURER_CLASS.get(mfr.get("Code", ""), "")
+    return ""
+
+
 def build_std_item(record, ctx, external_loadout=None, nested=False):
     """Build a full stdItem dict from a parsed entity record."""
     attach_def = record.get("attachDef", {})
@@ -731,7 +785,6 @@ def build_std_item(record, ctx, external_loadout=None, nested=False):
     # WeaponDefensive.CountermeasureLauncher has the INVERTED rule.
     raw_desc = attach_def.get("description", "")
     desc_is_empty = raw_desc in ("", "@LOC_EMPTY", "@LOC_PLACEHOLDER")
-    base_type = full_type.split(".")[0] if full_type else ""
 
     class_name = record.get("className", "")
     # Items with name=@LOC_PLACEHOLDER always carry Class (set to @LOC_PLACEHOLDER below),
@@ -786,21 +839,8 @@ def build_std_item(record, ctx, external_loadout=None, nested=False):
         raw_name = attach_def.get("name", "")
         if raw_name == "@LOC_PLACEHOLDER":
             si["Class"] = "@LOC_PLACEHOLDER"
-        elif class_name in _CLASS_VALUE_OVERRIDES:
-            si["Class"] = _CLASS_VALUE_OVERRIDES[class_name]
-        elif base_type in _COMPONENT_TYPES_CLASSED and mfr:
-            # LifeSupport: capital-class (size 4) units are ship-integrated
-            # for Idris/Polaris/890 and carry empty Class; smaller sizes
-            # (S00–S03) are player-purchasable civilian grade.
-            if full_type == "LifeSupportGenerator.UNDEFINED":
-                if attach_def.get("size") == 4:
-                    si["Class"] = ""
-                else:
-                    si["Class"] = "Civilian"
-            else:
-                si["Class"] = MANUFACTURER_CLASS.get(mfr["Code"], "")
         else:
-            si["Class"] = ""
+            si["Class"] = _class_value(class_name, full_type, attach_def, mfr, ctx)
 
     # Durability (from SHealthComponentParams + SDistortionParams + misfire + ItemResourceComponentParams.selfRepair)
     health = components.get("health", {})

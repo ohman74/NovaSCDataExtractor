@@ -5,7 +5,7 @@ import re
 
 from ..utils import safe_float, safe_int, resolve_name, NULL_GUID
 from ..vehicle_impl_parser import get_vehicle_impl_data
-from .stditem import _clean_description, _firing_cadence
+from .stditem import _class_value, _clean_description, _firing_cadence
 
 # Movement classes that indicate ground vehicles (case-insensitive)
 _GROUND_MOVEMENT_CLASSES = {"arcadewheeled", "wheeled", "tracked"}
@@ -3431,9 +3431,6 @@ def _enrich_weapon_mount_unwrap(tree, loadout_entries, ctx, port_defs):
     items installed in TurretBase.MannedTurret-typed ports and reference treats
     them inconsistently — skipping those for safety.
     """
-    from .stditem import (MANUFACTURER_CLASS, _COMPONENT_TYPES_CLASSED,
-                            _CLASS_VALUE_OVERRIDES)
-
     weapons = tree.setdefault("Weapons", {})
     mt = weapons.setdefault("MannedTurrets", {})
     mt.setdefault("InstalledItems", [])
@@ -3467,10 +3464,7 @@ def _enrich_weapon_mount_unwrap(tree, loadout_entries, ctx, port_defs):
                 )
                 should_unwrap = outer_accepts_wm or "mountedgun" in pn_lower
                 if should_unwrap:
-                    _emit_unwrapped_weapon(mt, item, ad, port_name, pd, ctx,
-                                             MANUFACTURER_CLASS,
-                                             _COMPONENT_TYPES_CLASSED,
-                                             _CLASS_VALUE_OVERRIDES)
+                    _emit_unwrapped_weapon(mt, item, ad, port_name, pd, ctx)
                 # Don't recurse into WeaponMount children; the inner weapon
                 # is emitted directly. Continue to next sibling.
                 continue
@@ -3480,9 +3474,7 @@ def _enrich_weapon_mount_unwrap(tree, loadout_entries, ctx, port_defs):
     _walk(loadout_entries)
 
 
-def _emit_unwrapped_weapon(mt, wm_item, wm_ad, outer_port_name, outer_pd, ctx,
-                              MANUFACTURER_CLASS, _COMPONENT_TYPES_CLASSED,
-                              _CLASS_VALUE_OVERRIDES):
+def _emit_unwrapped_weapon(mt, wm_item, wm_ad, outer_port_name, outer_pd, ctx):
     """Emit a single unwrapped weapon entry into mt.InstalledItems."""
     # Find the WeaponMount item's `weapon` sub-port definition
     weapon_port = None
@@ -3524,13 +3516,7 @@ def _emit_unwrapped_weapon(mt, wm_item, wm_ad, outer_port_name, outer_pd, ctx,
         bl_name = weapon_cn
 
     mfr = ctx.get_manufacturer(weapon_ad.get("manufacturerGuid", ""))
-    mfr_code = (mfr or {}).get("Code", "") if mfr else ""
-    base_type = weapon_full_type.split(".")[0] if weapon_full_type else ""
-    bl_class = ""
-    if weapon_cn in _CLASS_VALUE_OVERRIDES:
-        bl_class = _CLASS_VALUE_OVERRIDES[weapon_cn]
-    elif base_type in _COMPONENT_TYPES_CLASSED and mfr_code:
-        bl_class = MANUFACTURER_CLASS.get(mfr_code, "")
+    bl_class = _class_value(weapon_cn, weapon_full_type, weapon_ad, mfr, ctx)
 
     bl = {
         "ClassName": weapon_cn,
@@ -4373,21 +4359,8 @@ def _build_standard_entry(port_name, entity_class, item_record, children, ctx, p
             entry["Loadout"] = src_ref or item_guid or entity_class
         else:
             entry["Loadout"] = item_guid or entity_class
-        # BaseLoadout.Class: look up via manufacturer class map (matches stditem.py)
-        from .stditem import (MANUFACTURER_CLASS, _COMPONENT_TYPES_CLASSED,
-                                _CLASS_VALUE_OVERRIDES)
-        base_type = full_type.split(".")[0] if full_type else ""
-        mfr_code = (mfr or {}).get("Code", "") if mfr else ""
-        bl_class = ""
-        if entity_class in _CLASS_VALUE_OVERRIDES:
-            bl_class = _CLASS_VALUE_OVERRIDES[entity_class]
-        elif base_type in _COMPONENT_TYPES_CLASSED and mfr_code:
-            if full_type == "LifeSupportGenerator.UNDEFINED":
-                # Capital-class (size 4) is ship-integrated; smaller sizes
-                # are player-purchasable civilian grade.
-                bl_class = "" if ad.get("size") == 4 else "Civilian"
-            else:
-                bl_class = MANUFACTURER_CLASS.get(mfr_code, "")
+        # BaseLoadout.Class: same derivation as stdItem.Class
+        bl_class = _class_value(entity_class, full_type, ad, mfr, ctx)
         # Reference's BaseLoadout.Class behaviour is type-specific: it
         # consistently omits Class for FlightController, WheeledController,
         # Display, Room, ToolArm, and a handful of controller-style turrets,
