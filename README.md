@@ -218,3 +218,15 @@ Delete `parsed_items.json` + `parsed_vehicles.json` after changes to `dataforge_
 - CryXML binary entity files are converted to text XML in `extractor.py` before parsing.
 - The reference format uses several ref-specific conventions that aren't derivable from raw data (e.g. pitchAxis angle-limit inheritance, specific className allow/block lists). These are captured as constants at the top of `builders/stditem.py`.
 - See `NAME_FILTERS.md` for the audit of remaining name-based filters and their refactor status — the project enforces structural classification per `.claude/CLAUDE.md`.
+
+## License
+
+The source code in this repository is licensed under the
+[GNU Affero General Public License v3.0](./LICENSE) (AGPL-3.0). If you modify
+it and distribute it or run it as a network service, you must make your
+modified source available under the same license.
+
+This license covers the code only. Star Citizen, its game data, and any data
+extracted from it (including the `Live.zip` / `output` files) are the property
+of Cloud Imperium Games and are not covered by this license. This project is
+unofficial and not affiliated with or endorsed by Cloud Imperium Games.
