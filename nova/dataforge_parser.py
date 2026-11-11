@@ -34,7 +34,7 @@ from .utils import safe_float, safe_int, safe_bool, NULL_GUID
 _RECORD_TYPES = frozenset({
     "EntityClassDefinition", "SCItemManufacturer", "AmmoParams",
     "InventoryContainer", "WeaponGimbalModeModifierDef",
-    "SIFCSModifiersLegacy", "CraftingBlueprintRecord",
+    "SIFCSModifiersLegacy", "CraftingBlueprintRecord", "CraftingGlobalParams",
     "ActorProceduralRecoilConfig", "ActorProceduralRecoilModifiers",
     "WeaponProceduralRecoilConfigDef", "WeaponMisfireDef",
     "BlueprintPoolRecord", "FactionReputation",
@@ -241,6 +241,9 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
     crafting_blueprints = {}  # target-entity-guid -> {tiers: [{craftTime, slots: [...]}]}
     raw_crafting_blueprints = []  # all parsed blueprints; target GUIDs resolved post-loop
                                   # (see _resolve_crafting_targets) once items_by_class is complete
+    # Blueprint-record GUIDs every player knows from the start
+    # (CraftingGlobalParams/defaultBlueprintSelection). Lowercased.
+    default_blueprint_guids = set()
     gpp_records = {}  # gpp-guid -> {propertyName, unitFormat, className}
     recoil_configs = {}  # config-guid -> {setups: [{filterByAimStanceState, modifiersGuid}, ...]}
     recoil_modifiers = {}  # modifiers-guid -> {hands: {...}, aim: {...}, body: {...}, head: {...}}
@@ -438,6 +441,26 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
                 # not the target item GUID) back to the target.
                 bp["blueprintGuid"] = guid
                 raw_crafting_blueprints.append(bp)
+            elem.clear()
+
+        elif elem_type == "CraftingGlobalParams":
+            # Singleton record. defaultBlueprintSelection holds one polymorphic
+            # DefaultBlueprintSelection_* child; _Whitelist lists the blueprint
+            # records every player starts with. Walk whatever child is present
+            # and collect its References, so a new selection type still yields
+            # its list; warn so a semantically different variant gets reviewed.
+            in_record = False
+            sel = elem.find("defaultBlueprintSelection")
+            if sel is not None:
+                for variant in sel:
+                    if variant.tag != "DefaultBlueprintSelection_Whitelist":
+                        print(f"  WARNING: unknown default blueprint selection "
+                              f"'{variant.tag}', treating its References as "
+                              f"default-known")
+                    for ref in variant.iter("Reference"):
+                        v = ref.get("value", "")
+                        if v:
+                            default_blueprint_guids.add(v.lower())
             elem.clear()
 
         elif elem_type == "CraftingGameplayPropertyDef":
@@ -899,6 +922,8 @@ def stream_parse_dataforge(xml_path, cache_dir=None):
     # Key crafting blueprints by the GUID of the item they produce, repairing
     # CIG's shared-entityClass copy-paste defect along the way. Must run after
     # the parse loop so items_by_class is complete for className resolution.
+    for bp in raw_crafting_blueprints:
+        bp["defaultKnown"] = bp["blueprintGuid"].lower() in default_blueprint_guids
     crafting_blueprints = _resolve_crafting_targets(raw_crafting_blueprints,
                                                     items_by_class)
 

@@ -1260,6 +1260,8 @@ These are applied as deltas to IFCS fields for items with "_Blade_HND" or "_Blad
 |---|---|
 | `TargetDescription` | `EntityClassDefinition/Components/SItemDefinition/Localization@Description` (parsed into `attachDef.description`) |
 | `RewardSources[]` | reverse index built in `nova/__main__._build_reward_sources_index` from `parsed_contract_rewards.json` and `parsed_scenario_rewards.json`. Keyed by the *blueprint record's* GUID (`bp["blueprintGuid"]`, set by the parser during the `CraftingBlueprintRecord` parse loop; targets are re-keyed afterwards by `_resolve_crafting_targets`). Each entry is one of:<br>**Contract:** `{Kind, MissionClassName, PoolClassName, EffectiveChance, OnMissionResults}`<br>**ScenarioTier:** `{Kind, MissionClassName, PoolClassName, MinPoints}` |
+| `DefaultKnown` | `true` when the blueprint record's GUID is listed in `Records/crafting/globalparams/craftingglobalparams.xml` → `CraftingGlobalParams/defaultBlueprintSelection/DefaultBlueprintSelection_Whitelist/blueprintRecords/Reference[*]@value`: the starter blueprints every player knows. Stored on each blueprint as `defaultKnown` in `parsed_crafting.json` |
+| `Obtainable` | `(DefaultKnown or RewardSources non-empty) and the target item exists`. A recipe whose `CraftingProcess_Creation@entityClass` points at no entity in the build (e.g. `BP_CRAFT_COOL_S04_CNOU_Pioneer`, a cooler for an unreleased ship) is never obtainable. Blueprints granted only by systems absent from the game files (server-side events) will read `false` |
 
 `EffectiveChance = PoolChance × (weight_in_pool / sum_weights_in_pool)`. Multiple reward sources for the same blueprint each appear as a separate entry; consumers can sum or take the max as appropriate.
 
