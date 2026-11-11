@@ -25,7 +25,7 @@ from .converter import convert_game_dcb, convert_entities
 from .dataforge_parser import stream_parse_dataforge
 from .entity_parser import parse_entity_file
 from .vehicle_impl_parser import parse_vehicle_implementations
-from .utils import parse_localization, resolve_name, NULL_GUID
+from .utils import parse_localization, resolve_name, apply_description_grades, NULL_GUID
 from .cosmetic_classifier import (
     identify_cosmetic_variants,
     identify_variants,
@@ -666,6 +666,10 @@ def run_extraction(config, args):
     print("\n[PARSE] Loading localization...")
     translations = parse_localization(loc_path)
     print(f"  Loaded {len(translations)} translations")
+    grade_fixes = apply_description_grades(items_by_class, translations)
+    print(f"  Grade taken from description for {len(grade_fixes)} items")
+    for cls, old, new in grade_fixes:
+        print(f"    {cls}: {old} -> {new}")
 
     print("\n[PARSE] Parsing vehicle implementations...")
     vehicle_impls = parse_vehicle_implementations(config.cache_dir)
