@@ -14,8 +14,12 @@ Each entry:
 - Modifiers expose the GPP class name (e.g. `GPP_Weapon_FireRate`) so
   consumers don't need a separate gpp lookup.
 - Resource/Item cost GUIDs match the entries in `resources.json`.
-- `RewardSources[]` — references to missions.json entries (ClassName +
+- `RewardSources[]` - references to missions.json entries (ClassName +
   PoolClassName) that can grant this blueprint, with EffectiveChance.
+- `DefaultKnown` - every player starts with it
+  (CraftingGlobalParams/defaultBlueprintSelection).
+- `Obtainable` - (DefaultKnown or any RewardSources) and the target item
+  exists in this build.
 """
 
 from typing import Any
@@ -154,6 +158,12 @@ def build_blueprints(ctx) -> list[dict]:
         reward_sources = list(
             ctx.reward_sources_by_bp_guid.get(bp_record_guid.lower(), [])
         )
+        default_known = bool(bp.get("defaultKnown", False))
+        # A player can hold the blueprint (starter set or a reward) AND it
+        # produces an item that exists in this build. A recipe whose target
+        # entity is absent (e.g. a cooler for an unreleased ship) is never
+        # craftable, whatever grants it.
+        obtainable = (default_known or bool(reward_sources)) and target_rec is not None
 
         entry = {
             "TargetGUID": target_guid,
@@ -164,6 +174,8 @@ def build_blueprints(ctx) -> list[dict]:
             "TargetSubType": target_subtype,
             "TargetSize": target_size,
             "Tiers": tiers_out,
+            "DefaultKnown": default_known,
+            "Obtainable": obtainable,
             "RewardSources": reward_sources,
         }
         out.append(entry)
