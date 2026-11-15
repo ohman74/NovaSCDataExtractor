@@ -2911,9 +2911,24 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
                 continue
             _place(tree, "Storage", se)
 
-    # Add ports from vehicle impl that aren't in the loadout
+    # Add ports from vehicle impl that aren't in the loadout. Port names are
+    # compared case-insensitively, like the port_defs lookup above: the
+    # loadout sometimes spells a port differently from the impl XML
+    # (GAMA_Hyun / Syulen loadouts say `hardpoint_weapon_Left`, the impl
+    # `hardpoint_weapon_left`), and a case-sensitive check re-emitted the
+    # filled port as a second, empty slot. Only entries that install
+    # something match case-insensitively; an empty entry keeps the exact-name
+    # match it always had, so an empty `hardpoint_Paint` in the Reclaimer
+    # loadout does not hide the impl's `hardpoint_paint`.
     if impl_ports:
-        loadout_port_names = {e.get("portName", "") for e in loadout_entries}
+        def _fills(e):
+            return bool(e.get("entityClassName") or e.get("entityClassReference")
+                        or any(c.get("entityClassName") or c.get("entityClassReference")
+                               for c in e.get("children", []) or []))
+        loadout_port_names = set()
+        for e in loadout_entries:
+            pn = e.get("portName", "") or ""
+            loadout_port_names.add(pn.lower() if _fills(e) else pn)
         _add_impl_only_ports(tree, impl_ports, loadout_port_names)
 
     # Add ports declared only in the ship's entity-XML (components.ports /
@@ -2924,14 +2939,15 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
     # structurally-defined hardpoints, which violates the "never skip
     # ports that exist on the ship" principle.
     if ship_components_ports:
-        loadout_port_names = {e.get("portName", "") for e in loadout_entries}
+        # Lowercased for the same reason as the impl-only pass above.
+        loadout_port_names = {(e.get("portName", "") or "").lower() for e in loadout_entries}
         impl_port_names = set()
 
         def _collect_impl_names(node):
             if isinstance(node, dict):
                 n = node.get("name", "")
                 if n:
-                    impl_port_names.add(n)
+                    impl_port_names.add(n.lower())
                 for v in node.values():
                     _collect_impl_names(v)
             elif isinstance(node, list):
@@ -2944,7 +2960,7 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
 
         for p in ship_components_ports:
             name = p.get("name", "")
-            if not name or name in loadout_port_names or name in impl_port_names:
+            if not name or name.lower() in loadout_port_names or name.lower() in impl_port_names:
                 continue
             types = p.get("types", []) or []
             if not types:
@@ -4157,7 +4173,9 @@ def _add_impl_only_ports(tree, impl_ports, loadout_port_names):
 
     def _emit(port, is_top_level=False):
         pname = port.get("name", "")
-        if not pname or pname in loadout_port_names:
+        # The caller lowercases the names of filled loadout entries and keeps
+        # empty entries' names as spelled; check both forms.
+        if not pname or pname in loadout_port_names or pname.lower() in loadout_port_names:
             return
         # `skipPart="1"` marks variant-conditional ports that are disabled
         # in the base impl. Modifications can re-enable them by overriding
