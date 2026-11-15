@@ -2859,7 +2859,8 @@ def _build_hardpoints(loadout_entries, ctx, impl_ports=None, storage_entries=Non
             if hp:
                 _place(tree, category, hp)
         elif category == "CargoContainers":
-            hp = _build_cargo_container_entry(port_name, entity_class, item_record, ctx)
+            hp = _build_cargo_container_entry(port_name, entity_class, item_record, ctx,
+                                              port_def=port_def)
             if hp:
                 _place(tree, category, hp)
         elif category == "SelfDestruct":
@@ -4767,16 +4768,22 @@ def _build_simple_entry(port_name, entity_class, item_record, ctx, use_display_n
     return entry
 
 
-def _build_cargo_container_entry(port_name, entity_class, item_record, ctx):
+def _build_cargo_container_entry(port_name, entity_class, item_record, ctx, port_def=None):
     """Build a CargoContainers entry (mining ore pods, Hornet F7C cargo pod).
 
-    Ref shape: {Name, Mass, Size, Grade, Capacity} — no Uneditable.
+    Ref shape: {Name, Mass, Size, Grade, Capacity}.
     Capacity is the ore-storage capacity from `ResourceContainer.capacity`
     (gameplay-cargo SCU), not `attachDef.volume` (physical fitment volume).
     Verified 2026-05-05: Mole pod has volume=8 SCU but holds 12 SCU of ore;
     ROC pod has volume=2.5 SCU but holds 1.2 SCU. REF emits the
     ResourceContainer value. Falls back to attachDef.volume for non-mining
     cargo pods (Hornet F7C) which lack a ResourceContainer.
+
+    Ore pods are swappable in game (Enhanced / MC-4 pods), so on top of the
+    ref shape the entry also carries what a loadout tool needs to treat the
+    pod as a slot, in the same form as `_build_standard_entry`: PortName,
+    MinSize/MaxSize, Types, PortTags/RequiredTags and Flags from the port
+    definition, Uneditable, and a BaseLoadout naming the installed pod.
     """
     if not item_record:
         return None
@@ -4809,6 +4816,35 @@ def _build_cargo_container_entry(port_name, entity_class, item_record, ctx):
         capacity = round(ad["volume"] / 1000000.0, 2)
     if capacity is not None:
         entry["Capacity"] = round(capacity, 2)
+
+    # Slot fields (see docstring).
+    size = ad.get("size", 1)
+    pd = port_def if isinstance(port_def, dict) else {}
+    entry["PortName"] = pd.get("name") or port_name
+    entry["MinSize"] = pd.get("minSize", size)
+    entry["MaxSize"] = pd.get("maxSize", size)
+    if pd.get("types"):
+        entry["Types"] = list(pd["types"])
+    raw_flags = pd.get("flags")
+    if raw_flags:
+        entry["Flags"] = ([f for f in raw_flags.split() if f]
+                          if isinstance(raw_flags, str) else list(raw_flags))
+    pt = pd.get("portTags", "")
+    if pt:
+        entry["PortTags"] = pt.split() if isinstance(pt, str) else list(pt)
+    rt = pd.get("requiredPortTags", "")
+    if rt:
+        entry["RequiredTags"] = rt.split() if isinstance(rt, str) else list(rt)
+    entry["Uneditable"] = bool(pd.get("uneditable"))
+    t = ad.get("type", "")
+    st = ad.get("subType", "")
+    entry["BaseLoadout"] = {
+        "ClassName": entity_class,
+        "Name": name,
+        "Type": f"{t}.{st}" if t and st else t,
+        "Size": size,
+        "Grade": ad.get("grade", 1),
+    }
     return entry
 
 
